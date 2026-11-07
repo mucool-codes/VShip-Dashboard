@@ -4,6 +4,8 @@ This guide is for the person who uses the dashboard day to day. (Technical detai
 
 The monitor watches the ship's network logs (Wi-Fi access points, servers, switches and the firewall) and shows on one screen what is working, what is not, and what changed. It runs on your laptop and opens in your web browser. It does not need an internet connection.
 
+**On your phone too:** the same dashboard can open on an Android phone or iPhone, laid out for a small screen. See **[PHONE_ACCESS.md](PHONE_ACCESS.md)** for the 10-minute setup.
+
 ---
 
 ## 1. One-time setup
@@ -45,6 +47,8 @@ You need Windows and about 10 minutes.
 | **Reopen the dashboard** if you closed the browser | Double-click `start.bat` again, or go to http://localhost:8080. If the monitor is already running, it just reopens the page. |
 
 **Keep the black window open** while you want the monitor to watch the ship. You can minimise it.
+
+**On your phone:** once Tailscale is set up ([PHONE_ACCESS.md](PHONE_ACCESS.md)), tap the **Vessel Net** icon on the phone while the monitor is running on the laptop. The black window and the **Phone** button at the top of the dashboard show the phone address and a QR code.
 
 ### Coming back after a break
 
@@ -189,6 +193,7 @@ The file plays back at 60× speed, so one hour of data plays in one minute. If y
 
 ## 7. Good to know
 
+- **Phone:** the phone shows the laptop's dashboard, so it works only while the laptop is awake and the monitor window is open. Only devices signed in to your Tailscale account can open it.
 - **Privacy:** crew devices are shown as codes (`Device-3FA2C1`), not by their real addresses. Check your company policy before changing this (`mask_clients` in `config.toml`).
 - **Storage:** everything stays on this laptop, in the `data` folder. Messages older than 14 days are deleted automatically. You can change this with `retention_days` in `config.toml`.
 - **Settings:** alert thresholds such as how many minutes before a device counts as silent are in `config.toml`, with a comment on each line. Restart the monitor after changing them.

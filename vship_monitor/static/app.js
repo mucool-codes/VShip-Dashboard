@@ -40,6 +40,8 @@
   const CLASS_NAMES = { wifi: "Wi-Fi", server: "Servers", firewall: "Firewall", switch: "Switches", other: "Other" };
   const SERIES = { wifi: "--series-wifi", server: "--series-server", firewall: "--series-firewall", switch: "--series-switch" };
 
+  const PHONE = matchMedia("(max-width: 700px)");
+
   // ---------- app state ----------
   const S = {
     tab: "infra", window: "1h", metric: "e", alertFilter: "active",
@@ -48,11 +50,28 @@
   };
 
   // ---------- theme ----------
-  function applyTheme(t) { document.documentElement.dataset.theme = t; try { localStorage.setItem("theme", t); } catch (e) {} }
+  function applyTheme(t) {
+    document.documentElement.dataset.theme = t;
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", t === "light" ? "#fcfcfb" : "#1a1a19");
+    try { localStorage.setItem("theme", t); } catch (e) {}
+  }
   applyTheme((() => { try { return localStorage.getItem("theme"); } catch (e) { return null; } })() || "dark");
   $("theme-btn").onclick = () => { applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"); refreshTab(); };
 
   // ---------- notifications ----------
+  // Android Chrome only shows notifications through a service worker; desktops
+  // and iPhone home-screen apps accept either. The phone gets the same alerts
+  // as the laptop - while the app is open on the phone.
+  const SW = ("serviceWorker" in navigator && window.isSecureContext)
+    ? navigator.serviceWorker.register("/sw.js").catch(() => null) : Promise.resolve(null);
+  async function notify(title, opts) {
+    try {
+      const reg = await SW;
+      if (reg && reg.showNotification) { await reg.showNotification(title, { icon: "/static/icons/icon-192.png", ...opts }); return; }
+    } catch (e) {}
+    try { new Notification(title, opts); } catch (e) {}
+  }
+  if (!("Notification" in window)) $("notify-btn").hidden = true;   // e.g. iPhone Safari outside the home-screen app
   function paintNotify() {
     $("notify-btn").classList.toggle("on", S.notify);
     $("notify-label").textContent = S.notify ? "Notify on" : "Notify off";
@@ -74,6 +93,7 @@
     S.tab = b.dataset.tab;
     document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.id === "tab-" + S.tab));
     if (S.tab === "explorer" && !$("ex-results").childElementCount && !EX.busy) renderExplorer();
+    if (PHONE.matches) scrollTo(0, 0);
     refreshTab();
   });
   function setRange(w) {
@@ -146,7 +166,7 @@
     if (S.seenAlerts && S.notify && "Notification" in window && Notification.permission === "granted") {
       const min = { critical: 0, warning: 1, info: 2 }[S.status?.notify_min || "warning"];
       for (const a of ACTIVE) if (!S.seenAlerts.has(a.id) && !a.catchup && { critical: 0, warning: 1, info: 2 }[a.severity] <= min) {
-        try { new Notification(`${a.severity.toUpperCase()}: ${a.title}`, { body: a.detail || "", tag: "vship-" + a.id }); } catch (e) {}
+        notify(`${a.severity.toUpperCase()}: ${a.title}`, { body: a.detail || "", tag: "vship-" + a.id });
       }
     }
     S.seenAlerts = new Set([...(S.seenAlerts || []), ...ids]);
@@ -173,7 +193,7 @@
     const strip = $("alert-strip"); strip.replaceChildren();
     if (S.tab === "alerts" || S.tab === "explorer") return;
     const area = S.tab === "infra" ? ["wifi", "server", "switch", "feed", "other"] : ["firewall", "security", "feed"];
-    const rows = ACTIVE.filter(a => !a.acked && a.severity !== "info" && area.includes(a.area)).slice(0, 4);
+    const rows = ACTIVE.filter(a => !a.acked && a.severity !== "info" && area.includes(a.area)).slice(0, PHONE.matches ? 2 : 4);
     rows.forEach(a => strip.appendChild(alertRow(a, true)));
     const more = ACTIVE.filter(a => area.includes(a.area)).length - rows.length;
     if (more > 0) strip.appendChild(h("div", { class: "small muted" },
@@ -312,8 +332,9 @@
     return h("div", { class: "kpi" }, h("div", { class: "label" }, label), h("div", { class: "value" }, value), h("div", { class: "sub" }, sub));
   }
   function table(head, rows, right) {
-    return h("table", {}, h("thead", {}, h("tr", {}, head.map((x, i) => h("th", { class: right && right[i] ? "r" : "" }, x)))),
-      h("tbody", {}, rows.map(r => h("tr", {}, r.map((c, i) => h("td", { class: right && right[i] ? "r" : "" }, c))))));
+    return h("div", { class: "tbl-wrap" },
+      h("table", {}, h("thead", {}, h("tr", {}, head.map((x, i) => h("th", { class: right && right[i] ? "r" : "" }, x)))),
+        h("tbody", {}, rows.map(r => h("tr", {}, r.map((c, i) => h("td", { class: right && right[i] ? "r" : "" }, c)))))));
   }
   function hbars(rows, opts = {}) {
     const max = Math.max(1, ...rows.map(r => r.blocked + (r.allowed || 0)));
@@ -325,11 +346,10 @@
         const bar = h("div", { class: "track" },
           b ? h("div", { class: "seg-b", style: `width:${100 * b / max}%` }) : null,
           a ? h("div", { class: "seg-a", style: `width:${100 * a / max}%` }) : null);
-        bar.addEventListener("pointermove", e => Charts.showTip(e, r.label, [
+        Charts.hover(bar, e => Charts.showTip(e, r.label, [
           { name: "blocked", value: fmt(b), color: getComputedStyle(document.documentElement).getPropertyValue("--series-blocked") },
           ...(opts.noAllowed ? [] : [{ name: "allowed", value: fmt(a), color: getComputedStyle(document.documentElement).getPropertyValue("--series-allowed") }]),
-          ...(r.extra ? [{ name: r.extra, value: "", color: "transparent" }] : [])]));
-        bar.addEventListener("pointerleave", Charts.hideTip);
+          ...(r.extra ? [{ name: r.extra, value: "", color: "transparent" }] : [])]), Charts.hideTip);
         return h("div", { class: "hbar" }, h("div", { class: "lbl", title: r.label }, r.label, r.sub ? h("small", {}, r.sub) : null), bar,
           h("div", { class: "val" }, opts.noAllowed ? fmt(b) : `${fmt(b)} / ${fmt(a)}`));
       })));
@@ -437,7 +457,7 @@
       body.appendChild(table(["Device", "Type", "Last seen"], d.clients.slice(0, 40).map(c => [h("span", { class: "mono" }, c.id), c.os || "-", ago(c.last_seen, now)])));
     }
     body.appendChild(h("h3", {}, "Latest messages"));
-    body.appendChild(h("div", { class: "log" }, d.lines.map(r => h("div", { class: "ln" + (r.noise ? " noise" : ""), style: "grid-template-columns:76px 60px 1fr" },
+    body.appendChild(h("div", { class: "log" }, d.lines.map(r => h("div", { class: "ln drawer-ln" + (r.noise ? " noise" : "") },
       h("span", {}, time(r.ts)), h("span", { class: `sv-${r.severity}` }, r.sev_name), h("span", { class: "raw" }, r.raw)))));
   }
 
@@ -523,7 +543,7 @@
     // One desktop notification for the whole period, instead of one per alert.
     if (d.caught_up && !AWAY.notified && S.notify && "Notification" in window && Notification.permission === "granted") {
       AWAY.notified = true;
-      try { new Notification("While you were away", { body: `${d.alerts_total} alerts (${crit} critical) between ${longTime(d.from)} and ${longTime(d.to)}`, tag: "vship-away" }); } catch (e) {}
+      notify("While you were away", { body: `${d.alerts_total} alerts (${crit} critical) between ${longTime(d.from)} and ${longTime(d.to)}`, tag: "vship-away" });
     }
     clearTimeout(AWAY.timer);
     if (!d.caught_up && AWAY.open) AWAY.timer = setTimeout(renderAway, 3000);
@@ -557,6 +577,37 @@
   };
   document.addEventListener("keydown", e => { if (e.key === "Escape" && AWAY.open) closeAway(); });
 
+  // ---------- open on your phone (laptop only) ----------
+  async function renderPhone(refresh) {
+    const body = $("phone-body");
+    if (refresh) body.replaceChildren(h("div", { class: "empty" }, "Checking Tailscale…"));
+    let d; try { d = await api(`/api/phone${refresh ? "?refresh=1" : ""}`); }
+    catch (e) { body.replaceChildren(h("div", { class: "note" }, "Couldn't check - is the monitor still running?")); return; }
+    body.replaceChildren();
+    if (d.url) {
+      body.appendChild(h("p", { class: "small muted", style: "margin:0 0 4px;text-align:center" },
+        "Scan with your phone's camera. The phone needs the Tailscale app, signed in to the same account."));
+      if (d.qr_svg) { const q = h("div", { class: "qr" }); q.innerHTML = d.qr_svg; body.appendChild(q); }   // SVG built by our own server
+      body.appendChild(h("div", { class: "phone-url" }, d.url));
+      body.appendChild(h("ol", { class: "steps" },
+        h("li", {}, "Open the address on the phone (point the camera, tap the link)."),
+        h("li", {}, "Android, Chrome: menu ⋮ → ", h("b", {}, "Add to Home screen"), "."),
+        h("li", {}, "iPhone, Safari: Share button → ", h("b", {}, "Add to Home Screen"), "."),
+        h("li", {}, "The phone shows the dashboard whenever this laptop is on and the monitor window is open.")));
+    } else {
+      body.appendChild(h("div", { class: "note" }, d.hint || "Tailscale isn't set up yet."));
+      if (d.enable_url) body.appendChild(h("p", {}, h("a", { href: d.enable_url, target: "_blank", rel: "noopener" }, "Turn on HTTPS for your Tailscale network →")));
+      if (d.command) body.appendChild(h("p", { class: "small" }, "Or run this once in a Command Prompt: ", h("code", {}, d.command)));
+      body.appendChild(h("p", { class: "small muted" }, "Step-by-step guide: PHONE_ACCESS.md in the monitor folder."));
+    }
+    body.appendChild(h("div", { style: "margin-top:12px;text-align:right" },
+      h("button", { class: "btn", onclick: () => renderPhone(true) }, "Check again")));
+  }
+  $("phone-btn").onclick = () => { $("phone").hidden = false; renderPhone(false); };
+  $("phone-close").onclick = () => { $("phone").hidden = true; };
+  $("phone").addEventListener("click", e => { if (e.target === $("phone")) $("phone").hidden = true; });
+  document.addEventListener("keydown", e => { if (e.key === "Escape") $("phone").hidden = true; });
+
   // ---------- refresh loop ----------
   let busy = false;
   async function refreshTab() {
@@ -576,7 +627,11 @@
   tick();
   setInterval(tick, 5000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
-  window.addEventListener("resize", () => { clearTimeout(S.timer); S.timer = setTimeout(refreshTab, 200); });
+  let lastW = innerWidth;   // phone browsers fire "resize" when the address bar slides; only redraw on width changes
+  window.addEventListener("resize", () => {
+    if (innerWidth === lastW) return;
+    lastW = innerWidth; clearTimeout(S.timer); S.timer = setTimeout(refreshTab, 200);
+  });
   $("ex-cls").onchange = renderExplorer;
   $("ex-sev").onchange = renderExplorer;
 })();

@@ -16,7 +16,12 @@ if not exist .venv\Scripts\python.exe (
     pause
     exit /b 1
   )
-  .venv\Scripts\python -m pip install -r requirements.txt
+)
+REM Install / update packages when requirements.txt has changed since last time
+fc /b requirements.txt .venv\installed-requirements.txt >nul 2>nul
+if errorlevel 1 (
+  echo Installing required packages...
+  .venv\Scripts\python -m pip install -q -r requirements.txt && copy /y requirements.txt .venv\installed-requirements.txt >nul
 )
 .venv\Scripts\python -m vship_monitor
 pause

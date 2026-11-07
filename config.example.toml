@@ -47,6 +47,11 @@ mask_clients = true               # show crew devices as "Device-3FA2C1" instead
 [away]
 min_minutes = 10                  # show "While you were away" after being away this long
 
+[phone]
+# Open the dashboard on your phone through Tailscale - see PHONE_ACCESS.md.
+tailscale = true                  # look for Tailscale at startup and show the phone address + QR code
+auto_serve = true                 # run "tailscale serve" for you the first time (private to your Tailscale account)
+
 [noise]
 # Extra regular expressions for harmless messages to leave out of alerts and error counts.
 patterns = [

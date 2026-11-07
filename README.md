@@ -1,6 +1,6 @@
 # VShip Dashboard - vessel network monitor
 
-> **Using the dashboard?** Read [HOW_TO_USE.md](HOW_TO_USE.md), the step-by-step guide for day-to-day users. This README is the technical reference.
+> **Using the dashboard?** Read [HOW_TO_USE.md](HOW_TO_USE.md), the step-by-step guide for day-to-day users. **On a phone?** See [PHONE_ACCESS.md](PHONE_ACCESS.md). This README is the technical reference.
 
 A real-time monitor for one vessel's network logs. It runs on a single laptop and shows the results in the browser at `http://localhost:8080`.
 
@@ -16,6 +16,8 @@ When you come back after closing the app (or after leaving the dashboard tab una
 There is also an **Alerts** page (acknowledge, history, desktop notifications) and an **Event explorer** to search the raw messages. Clicking any device opens its detail panel: activity chart, message types, connected clients and latest lines.
 
 Everything works offline: no internet, CDN or cloud service is needed on board.
+
+The dashboard is responsive. Below 700 px wide it switches to a phone layout with a bottom tab bar, stacked cards, sideways-scrolling tables and tap-to-read charts. It can be added to the home screen (web app manifest and service worker). See [Phone access](#phone-access).
 
 ---
 
@@ -173,14 +175,28 @@ CSV replay ──┘                                                     │
 | `vship_monitor/sources.py` | Graylog poller, syslog listener, CSV replay |
 | `vship_monitor/store.py` | DuckDB storage (`data/vship.duckdb`) |
 | `vship_monitor/app.py` | Pipeline, catch-up / "while you were away", and the web API |
-| `vship_monitor/static/` | The dashboard (plain HTML/CSS/JS, no build step) |
+| `vship_monitor/phone.py` | Tailscale detection, `tailscale serve` setup, QR codes for phone access |
+| `vship_monitor/static/` | The dashboard (plain HTML/CSS/JS, no build step), home-screen icons and service worker |
 | `tests/` | Parser tests from real sample lines (`python -m pytest`) |
 
 Sizing from the sample: about 105k messages/hour, roughly 30 per second, with peaks near 750/s. Parsing runs at about 30k lines/s, and dashboard queries take around 0.1 s on 24 hours of data.
+
+## Phone access
+
+The web server stays bound to `127.0.0.1`. Phones reach it through **Tailscale**: `tailscale serve --bg <port>` publishes the dashboard at `https://<laptop>.<tailnet>.ts.net`, with a real TLS certificate, and only to devices in the same tailnet. No firewall rule, port forward or `0.0.0.0` binding is needed.
+
+- On start-up (`[phone] tailscale = true`), `vship_monitor/phone.py` finds the Tailscale CLI, reads `tailscale status --json` and `tailscale serve status --json`, and prints the phone URL with a QR code in the console. With `auto_serve = true` it runs `tailscale serve --bg <port>` the first time. If HTTPS is not yet enabled for the tailnet, it captures and shows the enable link. It never replaces an existing serve config on `/` that points at another port.
+- The **Phone** button (desktop only) calls `GET /api/phone[?refresh=1]` and shows the same URL and QR code as SVG, or a hint saying what is missing.
+- `GET /manifest.webmanifest`, `/sw.js` and `static/icons/` provide home-screen install. The service worker doesn't cache anything (live data). It exists so Android can show alert notifications and to focus the app when one is tapped.
+- Responses are gzip-compressed: about 6 KB per 5-second refresh instead of about 45 KB.
+- The `.bat` launchers reinstall packages when `requirements.txt` changes (`qrcode` was added). If `qrcode` is missing, the URL is still shown, just without the QR code.
+
+User steps for Android and iPhone are in [PHONE_ACCESS.md](PHONE_ACCESS.md).
 
 ## Known limitations
 
 - **Parsing rules come from one 8-hour sample.** New device types or firmware may log lines that land in "other" or lack an event type. They are still stored, searchable and counted, and new warning/error types raise an alert. Add rules in `parser.py` as you meet them.
 - **The Graylog connection was tested against a stand-in server, not V.Ships' Graylog.** The first connection is the thing to check: the status bar shows any error message. If you're on Graylog 4.x, set `api = "export"`.
 - "Clients now" per access point counts devices seen associating in the last 15 minutes. It is an estimate, not the controller's exact client table.
+- **Phone access needs the laptop running.** The phone only views the laptop's dashboard. Notifications on the phone arrive only while the dashboard is open there; there is no push service. Phone access was tested with phone emulation and a stand-in for the Tailscale command, not yet on a real phone and tailnet.
 - The dashboard is for one vessel on one laptop. A fleet view would need a central server.

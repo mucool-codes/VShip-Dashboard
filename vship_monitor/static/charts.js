@@ -45,11 +45,36 @@
     t.style.display = "block";
     const w = t.offsetWidth, hgt = t.offsetHeight;
     let x = evt.clientX + 14, y = evt.clientY + 14;
-    if (x + w > innerWidth - 8) x = evt.clientX - w - 14;
-    if (y + hgt > innerHeight - 8) y = evt.clientY - hgt - 14;
+    if (evt.pointerType === "touch") {          // keep it above the finger, inside the screen
+      x = Math.min(Math.max(8, evt.clientX - w / 2), innerWidth - w - 8);
+      y = evt.clientY - hgt - 28;
+      if (y < 8) y = evt.clientY + 28;
+    } else {
+      if (x + w > innerWidth - 8) x = evt.clientX - w - 14;
+      if (y + hgt > innerHeight - 8) y = evt.clientY - hgt - 14;
+    }
     t.style.left = x + "px"; t.style.top = y + "px";
   }
   function hideTip() { tip().style.display = "none"; }
+
+  /* Hover on a mouse, tap or drag on a touch screen. On touch the tooltip
+     stays until the user taps somewhere else or scrolls. */
+  let touchClear = null;
+  function hover(target, onMove, onLeave) {
+    target.addEventListener("pointermove", onMove);
+    target.addEventListener("pointerdown", e => {
+      if (e.pointerType !== "mouse") {
+        if (touchClear && touchClear !== onLeave) touchClear();
+        touchClear = onLeave; onMove(e);
+      }
+    });
+    target.addEventListener("pointerleave", e => { if (e.pointerType === "mouse") onLeave(); });
+  }
+  function clearTouch() { if (touchClear) { touchClear(); touchClear = null; } hideTip(); }
+  document.addEventListener("pointerdown", e => {
+    if (touchClear && e.pointerType !== "mouse" && !e.target.closest(".chart svg, .hbar .track")) clearTouch();
+  }, true);
+  addEventListener("scroll", () => { if (touchClear) clearTouch(); }, { passive: true, capture: true });
 
   function legend(container, series, kind) {
     if (series.length < 2) return;
@@ -65,13 +90,14 @@
 
   /* Shared frame: x = time buckets, y = counts. */
   function frame(container, opts) {
+    if (touchClear) clearTouch();
     container.replaceChildren();
     const wrap = document.createElement("div"); wrap.style.position = "relative";
     legend(container, opts.series, opts.kind);
     container.appendChild(wrap);
     const W = container.clientWidth || 800;
     const H = (container.clientHeight || 240) - (opts.series.length > 1 ? 26 : 0);
-    const m = { l: 44, r: 12, t: 8, b: 24 };
+    const m = { l: W < 420 ? 36 : 44, r: W < 420 ? 6 : 12, t: 8, b: 24 };
     const svg = el("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}` }, wrap);
     return { svg, W, H, m, iw: W - m.l - m.r, ih: H - m.t - m.b };
   }
@@ -113,7 +139,7 @@
     const xh = el("line", { class: "xhair", y1: f.m.t, y2: f.m.t + f.ih, visibility: "hidden" }, f.svg);
     const dots = opts.series.map(s => el("circle", { r: 4, fill: css(s.color), stroke: css("--surface-1"), "stroke-width": 2, visibility: "hidden" }, f.svg));
     const hit = el("rect", { x: f.m.l, y: f.m.t, width: f.iw, height: f.ih, fill: "transparent" }, f.svg);
-    hit.addEventListener("pointermove", e => {
+    hover(hit, e => {
       const r = f.svg.getBoundingClientRect();
       const i = Math.max(0, Math.min(n - 1, Math.round((e.clientX - r.left - f.m.l) / f.iw * (n - 1))));
       xh.setAttribute("x1", X(i)); xh.setAttribute("x2", X(i)); xh.setAttribute("visibility", "visible");
@@ -121,8 +147,7 @@
       const end = new Date(xs[i].getTime() + opts.bucketMin * 60000);
       showTip(e, `${fmtTime(xs[i], opts.spanMin)} - ${fmtTime(end, 0)}`,
         opts.series.map(s => ({ name: s.name, value: s.values[i].toLocaleString(), color: css(s.color) })));
-    });
-    hit.addEventListener("pointerleave", () => { xh.setAttribute("visibility", "hidden"); dots.forEach(d => d.setAttribute("visibility", "hidden")); hideTip(); });
+    }, () => { xh.setAttribute("visibility", "hidden"); dots.forEach(d => d.setAttribute("visibility", "hidden")); hideTip(); });
   }
 
   /* Stacked bars; series[0] sits on the baseline. */
@@ -154,16 +179,15 @@
         base = y;
       });
       const hit = el("rect", { x: cx - slot / 2, y: f.m.t, width: slot, height: f.ih, fill: "transparent" }, g);
-      hit.addEventListener("pointermove", e => {
+      hover(hit, e => {
         g.style.filter = "brightness(1.15)";
         const end = new Date(x.getTime() + opts.bucketMin * 60000);
         showTip(e, `${fmtTime(x, opts.spanMin)} - ${fmtTime(end, 0)}`,
           opts.series.map(s => ({ name: s.name, value: s.values[i].toLocaleString(), color: css(s.color) }))
             .concat(opts.series.length > 1 ? [{ name: "total", value: totals[i].toLocaleString(), color: "transparent" }] : []));
-      });
-      hit.addEventListener("pointerleave", () => { g.style.filter = ""; hideTip(); });
+      }, () => { g.style.filter = ""; hideTip(); });
     });
   }
 
-  window.Charts = { line, stacked, fmtNum, showTip, hideTip };
+  window.Charts = { line, stacked, fmtNum, showTip, hideTip, hover };
 })();

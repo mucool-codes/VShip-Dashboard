@@ -76,6 +76,9 @@ def main():
     print(f"\n  Vessel monitor running at {url}  (Ctrl+C to stop)\n")
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+    if cfg["phone"].get("tailscale", True):
+        # look for Tailscale in the background and print the phone address + QR code
+        threading.Timer(2.0, app.state.phone.announce).start()
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 

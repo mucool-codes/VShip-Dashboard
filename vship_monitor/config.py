@@ -32,7 +32,9 @@ DEFAULTS = {
     "syslog": {"host": "0.0.0.0", "udp_port": 5514, "tcp_port": 5514},
     "replay": {"csv": "", "speed": 60.0, "loop": False},
     "privacy": {"mask_clients": True},
-    "away": {"min_minutes": 10},   # show "While you were away" after this long away
+    "away": {"min_minutes": 10},
+    # phone access through Tailscale (see PHONE_ACCESS.md)
+    "phone": {"tailscale": True, "auto_serve": True},   # show "While you were away" after this long away
     "noise": {"patterns": []},
     "alerts": {
         "learning_minutes": 120,         # no "new message type" alerts before this

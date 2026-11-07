@@ -11,11 +11,13 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .alerts import AlertEngine
 from .noise import NoiseFilter
 from .parser import SEV_NAMES, parse
+from .phone import Phone
 from .sources import GraylogSource, ReplaySource, SyslogSource
 from .state import State, mask_mac
 from .store import Store
@@ -294,6 +296,8 @@ def create_app(cfg: dict) -> FastAPI:
 
     app = FastAPI(title="V.Ships Vessel Network Monitor", lifespan=lifespan)
     app.state.pipe = pipe
+    app.add_middleware(GZipMiddleware, minimum_size=1000)   # ~6x less data per refresh, matters on a phone
+    app.state.phone = Phone(cfg["server"]["port"], cfg["phone"].get("auto_serve", True))
     sev_err = "severity <= 4 AND NOT noise"
 
     # ---- status & alerts ------------------------------------------------------
@@ -662,6 +666,34 @@ def create_app(cfg: dict) -> FastAPI:
         g = dict(cfg["graylog"])
         g["token"] = "set" if g.get("token") else "not set"
         return {**safe, "graylog": g, "user_noise": [str(x) for x in pipe.user_noise]}
+
+    # ---- phone access -----------------------------------------------------------------------
+    @app.get("/api/phone")
+    async def phone_info(refresh: bool = False):
+        if not cfg["phone"].get("tailscale", True):
+            return {"hint": "Phone access is turned off ([phone] tailscale = false in config.toml)."}
+        return await asyncio.get_running_loop().run_in_executor(None, app.state.phone.info, refresh)
+
+    @app.get("/manifest.webmanifest")
+    async def manifest():
+        name = cfg["vessel"]["name"]
+        return JSONResponse({
+            "name": f"{name} - Network monitor", "short_name": "Vessel Net",
+            "start_url": "/", "scope": "/", "display": "standalone",
+            "background_color": "#121211", "theme_color": "#1a1a19",
+            "icons": [
+                {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+                {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+                {"src": "/static/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+            ],
+        }, media_type="application/manifest+json")
+
+    @app.get("/sw.js")
+    async def service_worker():
+        # Lives at the site root so it covers the whole app. No offline cache:
+        # the dashboard is live data, so a stale copy would only mislead.
+        return FileResponse(STATIC / "sw.js", media_type="text/javascript",
+                            headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
 
     # ---- web page ---------------------------------------------------------------------------
     app.mount("/static", StaticFiles(directory=STATIC), name="static")

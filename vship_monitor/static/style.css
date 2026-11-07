@@ -97,12 +97,16 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: .01em; }
 .icon-btn.on { color: var(--good); }
 
 /* ---------- tabs & range ---------- */
-.tabs { display: flex; align-items: center; gap: 2px; padding: 0 20px; background: var(--surface-1);
-        border-bottom: 1px solid var(--border); position: sticky; top: 55px; z-index: 19; }
+.navbar { display: flex; align-items: center; gap: 12px; padding: 0 20px; background: var(--surface-1);
+          border-bottom: 1px solid var(--border); position: sticky; top: 55px; z-index: 19; }
+.tabs { display: flex; align-items: center; gap: 2px; flex: 1; }
 .tabs [role=tab] { background: none; border: 0; padding: 12px 14px; cursor: pointer;
                    color: var(--text-secondary); border-bottom: 2px solid transparent; font-weight: 500; }
 .tabs [role=tab]:hover { color: var(--text-primary); }
 .tabs [role=tab].active { color: var(--text-primary); border-bottom-color: var(--accent); }
+.tab-ico { display: none; width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8;
+           stroke-linecap: round; stroke-linejoin: round; }
+.tabs .short { display: none; }
 .badge { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 9px; font-size: 11px;
          background: var(--surface-2); border: 1px solid var(--border); text-align: center; }
 .badge.hot { background: var(--critical); border-color: var(--critical); color: #fff; }
@@ -125,7 +129,7 @@ main { padding: 16px 20px 40px; max-width: 1600px; margin: 0 auto; }
 .card-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
 .card-head h2 { margin-right: auto; }
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 14px; }
-.grid-2 > .card { margin-bottom: 14px; }
+.grid-2 > .card { margin-bottom: 14px; min-width: 0; }
 .loading { opacity: .55; transition: opacity .2s; }
 
 /* ---------- KPI tiles ---------- */
@@ -274,8 +278,8 @@ tbody tr:hover td { background: var(--surface-2); }
 @media (max-width: 900px) {
   .topbar { flex-wrap: wrap; }
   .areas { margin-left: 0; }
-  .grid-2 { grid-template-columns: 1fr; }
-  .tabs { position: static; flex-wrap: wrap; }
+  .grid-2 { grid-template-columns: minmax(0, 1fr); }   /* minmax: a wide table scrolls inside its card */
+  .navbar { position: static; flex-wrap: wrap; }
   .log .ln { grid-template-columns: 1fr; }
 }
 @media (forced-colors: active) {
@@ -309,3 +313,156 @@ tbody tr:hover td { background: var(--surface-2); }
 .mini-alert .d { color: var(--text-muted); font-size: 12px; }
 .mini-alert .w { color: var(--text-muted); font-size: 12px; white-space: nowrap; }
 .range button[hidden] { display: none; }
+
+/* ---------- tables that are wider than the screen scroll sideways ---------- */
+.tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* ---------- "Open on your phone" ---------- */
+.phone-modal { width: min(560px, 100%); }
+.qr { background: #fff; padding: 12px; border-radius: 10px; width: 232px; height: 232px; margin: 6px auto 10px; }
+.qr svg { width: 100%; height: 100%; display: block; }
+.phone-url { text-align: center; font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; margin-bottom: 8px; }
+.steps { margin: 6px 0 0; padding-left: 20px; color: var(--text-secondary); font-size: 13px; }
+.steps li { margin-bottom: 6px; }
+.steps code, .note code { font-family: var(--mono); background: var(--surface-2); padding: 1px 5px; border-radius: 4px;
+                          border: 1px solid var(--border); color: var(--text-primary); user-select: all; }
+
+/* =====================================================================
+   PHONE LAYOUT (narrow screens). Same four tabs, re-arranged:
+   status at the top, time range sticky under it, tabs as a bottom bar.
+   ===================================================================== */
+@media (max-width: 700px) {
+  body { font-size: 15px; }
+  .desktop-only { display: none !important; }
+
+  /* top bar: brand + buttons, then feed line, then a swipeable row of area chips */
+  .topbar { position: static; flex-wrap: wrap; gap: 8px 10px;
+            padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) 10px max(12px, env(safe-area-inset-left)); }
+  .brand { min-width: 0; flex: 1; }
+  .logo { width: 30px; height: 30px; }
+  .feed { order: 3; width: 100%; min-width: 0; }
+  .feed-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .areas { order: 4; width: 100%; flex-wrap: nowrap; overflow-x: auto; margin: 0 -12px; padding: 0 12px 2px;
+           width: calc(100% + 24px); scrollbar-width: none; }
+  .areas::-webkit-scrollbar { display: none; }
+  .area { flex: none; padding: 5px 10px; }
+  .top-actions { order: 2; }
+  .icon-btn { min-height: 36px; padding: 6px 10px; }
+  #notify-label { display: none; }
+
+  /* time range: sticky at the top, swipe sideways if it doesn't fit */
+  .navbar { position: sticky; top: 0; padding: 8px 12px; flex-wrap: nowrap;
+            padding-top: max(8px, env(safe-area-inset-top)); }
+  .range { overflow-x: auto; max-width: 100%; scrollbar-width: none; }
+  .range::-webkit-scrollbar { display: none; }
+  .range button { flex: none; padding: 7px 12px; font-size: 13px; }
+
+  /* tabs: fixed bottom bar with icons */
+  .tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; gap: 0;
+          background: var(--surface-1); border-top: 1px solid var(--border);
+          padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .tabs [role=tab] { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+                     padding: 8px 2px 7px; font-size: 11px; border-bottom: 0; border-top: 2px solid transparent;
+                     position: relative; min-height: 56px; }
+  .tabs [role=tab].active { border-top-color: var(--accent); color: var(--accent); }
+  .tab-ico { display: block; }
+  .tabs .full { display: none; }
+  .tabs .short { display: inline; }
+  .tabs .badge { position: absolute; top: 4px; left: calc(50% + 6px); font-size: 10px; min-width: 17px; }
+
+  main { padding: 10px 10px calc(78px + env(safe-area-inset-bottom)); }
+  .learning { margin: 10px 10px 0; }
+  .card { padding: 12px; border-radius: 10px; margin-bottom: 10px; }
+  .grid-2 { gap: 0; }
+  .grid-2 > .card { margin-bottom: 10px; }
+  .card-head { gap: 6px 10px; }
+  .card-head .muted.small { width: 100%; }
+
+  /* KPI tiles: two per row */
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+  .kpi { padding: 10px 12px; }
+  .kpi .value { font-size: 22px; }
+  .kpi .sub { overflow-wrap: anywhere; }
+  .kpi .sub .st { white-space: normal; }
+
+  /* charts a little shorter; the chart takes vertical swipes as scrolling */
+  .chart { height: 210px; }
+
+  /* alerts: stack severity/time, title, then buttons */
+  .alert-row { grid-template-columns: 1fr auto; grid-template-areas: "sev when" "body body" "act act"; gap: 4px 10px; padding: 10px 12px; }
+  .alert-row > :nth-child(1) { grid-area: sev; }
+  .alert-row > :nth-child(2) { grid-area: body; }
+  .alert-row > :nth-child(3) { grid-area: when; }
+  .alert-row > :nth-child(4) { grid-area: act; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .alert-row > :nth-child(4):empty { display: none; }
+  .alert-row .when br, .alert-row .when br + span { display: none; }
+
+  /* touch-sized buttons */
+  .btn { min-height: 36px; padding: 6px 14px; font-size: 13px; }
+  .seg button { padding: 7px 12px; font-size: 13px; }
+  .link { min-height: 32px; text-align: left; }
+
+  /* Wi-Fi access points: deck name above, two tiles per row */
+  .deck-row { grid-template-columns: 1fr; gap: 4px; }
+  .deck-name { padding-top: 4px; }
+  .ap { width: calc(50% - 3px); padding: 9px 10px; }
+
+  /* bars */
+  .hbar { grid-template-columns: minmax(0, 38%) 1fr auto; gap: 8px; }
+  .hbar .val { font-size: 11px; }
+
+  /* tables */
+  table { font-size: 13px; }
+  .tbl-wrap { margin: 0 -12px; padding: 0 12px; }
+  .tbl-wrap table { min-width: 100%; }
+  .tbl-wrap .tpl { display: inline-block; min-width: 220px; }
+  .srv-head { flex-wrap: wrap; }
+  .srv-head .muted.small { margin-left: 0 !important; width: 100%; }
+
+  /* explorer */
+  .filters input:not([type=checkbox]), .filters select { flex: 1 1 100%; min-height: 40px; font-size: 16px; } /* 16px stops iPhone zooming */
+  .filters input[type=checkbox] { width: 20px; height: 20px; }
+  .filters .check { flex: 1; }
+  .filters button.primary { min-height: 40px; padding: 8px 22px; }
+  .log .ln { grid-template-columns: auto auto 1fr; gap: 2px 10px; padding: 8px 4px; }
+  .log .ln .raw { grid-column: 1 / -1; }
+
+  /* device drawer and pop-ups: full screen */
+  .drawer { width: 100vw; border-left: 0; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  .drawer-head { padding: 12px 14px; }
+  .drawer-body { padding: 12px 14px 30px; }
+  .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .drawer .log .ln { grid-template-columns: auto auto 1fr !important; }
+  .modal-back { padding: 0; display: flex; }
+  .modal-back[hidden] { display: none; }
+  .modal { width: 100%; min-width: 0; max-height: none; height: 100%; border-radius: 0; border: 0;
+           padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  .modal-body { min-height: 0; overflow-x: hidden; }
+  .modal-head { gap: 10px; }
+  .modal-head > div { min-width: 0; }
+  .modal-head { padding: 14px 14px 8px; }
+  .modal-body { padding: 4px 14px 14px; flex: 1; }
+  .modal-foot { padding: 10px 14px; flex-direction: column; align-items: stretch; }
+  .modal-foot .spacer { display: none; }
+  .modal-foot { gap: 6px; }
+  .modal-foot button { min-height: 36px; font-size: 13px; }
+  .modal-foot .primary { min-height: 44px; font-size: 15px; }
+  .modal-foot .primary { order: -1; }
+  .modal .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mini-alert { grid-template-columns: 1fr auto; }
+  .mini-alert > div { grid-column: 1 / -1; grid-row: 2; }
+
+  .tooltip { max-width: calc(100vw - 16px); }
+}
+
+/* any touch screen (phones and tablets): bigger hit areas, no hover-only info */
+@media (pointer: coarse) {
+  .chart svg rect { touch-action: pan-y; }
+  .range button, .seg button { min-height: 34px; }
+}
+/* opened from the home-screen icon: no browser bar, so leave room for the status bar */
+@media (display-mode: standalone) and (min-width: 701px) {
+  .topbar { padding-top: max(10px, env(safe-area-inset-top)); }
+}
+.log .ln.drawer-ln { grid-template-columns: 76px 60px 1fr; }
+@media (max-width: 700px) { .log .ln.drawer-ln { grid-template-columns: auto auto 1fr; } .log .ln.drawer-ln .raw { grid-column: 1 / -1; } }

@@ -2,9 +2,18 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Vessel Network Monitor</title>
 <link rel="stylesheet" href="/static/style.css">
+<!-- "Add to home screen" on Android and iPhone -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#1a1a19">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Vessel Net">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
 </head>
 <body>
 <header class="topbar">
@@ -23,7 +32,11 @@
   </div>
   <div class="areas" id="areas" aria-label="System status"></div>
   <div class="top-actions">
-    <button class="icon-btn" id="notify-btn" title="Desktop notifications">
+    <button class="icon-btn desktop-only" id="phone-btn" title="Open this dashboard on your phone">
+      <svg viewBox="0 0 24 24" width="18" height="18"><rect x="7" y="2.5" width="10" height="19" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M11 18h2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <span>Phone</span>
+    </button>
+    <button class="icon-btn" id="notify-btn" title="Notifications">
       <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 10a6 6 0 1 1 12 0c0 5 2 6 2 6H4s2-1 2-6M10 20a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
       <span id="notify-label">Notify off</span>
     </button>
@@ -33,12 +46,21 @@
   </div>
 </header>
 
-<nav class="tabs" role="tablist">
-  <button role="tab" data-tab="infra" class="active">Infrastructure health</button>
-  <button role="tab" data-tab="security">Internet &amp; security</button>
-  <button role="tab" data-tab="alerts">Alerts <span class="badge" id="alert-badge">0</span></button>
-  <button role="tab" data-tab="explorer">Event explorer</button>
-  <div class="spacer"></div>
+<div class="navbar">
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="infra" class="active">
+      <svg class="tab-ico" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>
+      <span class="full">Infrastructure health</span><span class="short">Health</span></button>
+    <button role="tab" data-tab="security">
+      <svg class="tab-ico" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.4 8.2-8 9-4.6-.8-8-4.5-8-9V6z"/></svg>
+      <span class="full">Internet &amp; security</span><span class="short">Security</span></button>
+    <button role="tab" data-tab="alerts">
+      <svg class="tab-ico" viewBox="0 0 24 24"><path d="M6 10a6 6 0 1 1 12 0c0 5 2 6 2 6H4s2-1 2-6M10 20a2 2 0 0 0 4 0"/></svg>
+      <span class="full">Alerts</span><span class="short">Alerts</span> <span class="badge" id="alert-badge">0</span></button>
+    <button role="tab" data-tab="explorer">
+      <svg class="tab-ico" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.5 5.5"/></svg>
+      <span class="full">Event explorer</span><span class="short">Explorer</span></button>
+  </nav>
   <div class="range" role="radiogroup" aria-label="Time range" id="range">
     <button data-w="15m">15 min</button>
     <button data-w="1h" class="active">1 hour</button>
@@ -47,7 +69,7 @@
     <button data-w="7d">7 days</button>
     <button data-w="custom" id="range-away" hidden title="The period you were away">Since last visit</button>
   </div>
-</nav>
+</div>
 
 <div class="learning" id="learning" hidden>
   Learning normal behaviour - "new message type" alerts start once the app has seen two hours of data.
@@ -207,6 +229,15 @@
       <span class="spacer"></span>
       <button class="primary" id="away-ok">Got it - go live</button>
     </div>
+  </div>
+</div>
+<div class="modal-back" id="phone" hidden>
+  <div class="modal phone-modal" role="dialog" aria-modal="true" aria-labelledby="phone-title">
+    <div class="modal-head">
+      <div class="modal-title" id="phone-title">Open on your phone</div>
+      <button class="icon-btn" id="phone-close" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="phone-body"></div>
   </div>
 </div>
 <div class="tooltip" id="tooltip" role="tooltip"></div>

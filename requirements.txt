@@ -5,3 +5,4 @@ pandas>=2.0
 pytz
 httpx>=0.27
 tomli>=2.0; python_version < "3.11"
+qrcode>=7.4
