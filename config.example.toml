@@ -1,0 +1,69 @@
+# Copy this file to config.toml and edit it. Anything you leave out uses the default.
+# config.toml is git-ignored because it holds your Graylog token.
+
+[vessel]
+name = "MV Example"              # shown in the top-left corner
+
+[server]
+host = "127.0.0.1"                # only this laptop can open the dashboard
+port = 8080
+
+[storage]
+path = "data/vship.duckdb"        # one local file holds everything
+retention_days = 14               # older messages are deleted (~2.5M messages/day)
+
+[source]
+# Where the live data comes from:
+#   "graylog" - poll the ship's Graylog server (recommended)
+#   "syslog"  - receive syslog forwarded straight to this laptop
+#   "replay"  - play a CSV export (demo / testing)
+type = "graylog"
+
+[graylog]
+url = "http://192.168.1.10:9000"  # Graylog web address on the ship network
+token = ""                        # Graylog access token (see README)
+query = "*"                       # Graylog search query to limit what is pulled
+streams = []                      # optional stream IDs, e.g. ["000000000000000000000001"]
+poll_seconds = 5
+lag_seconds = 5
+api = "scripting"                 # "scripting" for Graylog 5.0+, "export" for Graylog 4.x
+verify_tls = true                 # set false only for a self-signed certificate you trust
+backfill_minutes = 60             # on first start, load this much history
+max_catchup_hours = 168           # after the app was closed, load at most this much missed data
+
+[syslog]
+host = "0.0.0.0"                  # listen on all network cards
+udp_port = 5514                   # ports above 1024 need no admin rights
+tcp_port = 5514
+
+[replay]
+csv = ""                          # path to a Graylog CSV export
+speed = 60                        # 60 = one hour of data plays in one minute; 0 = as fast as possible
+loop = false
+
+[privacy]
+mask_clients = true               # show crew devices as "Device-3FA2C1" instead of MAC / IP
+
+[away]
+min_minutes = 10                  # show "While you were away" after being away this long
+
+[noise]
+# Extra regular expressions for harmless messages to leave out of alerts and error counts.
+patterns = [
+  # "some harmless message",
+]
+
+[alerts]
+learning_minutes = 120            # no "new message type" alerts until this much data is seen
+silent_minutes = { wifi = 10, server = 10, firewall = 5, switch = 30 }
+silent_min_rate_per_min = 0.5
+spike_factor = 3.0                # error spike = this many times the device's usual level...
+spike_min_errors = 50             # ...and at least this many in 5 minutes
+noisy_client_drops = 500          # blocked connections from one device in 5 minutes
+port_scan_threshold = 20          # scans / spoofing events in 10 minutes
+link_flap_count = 3               # switch port downs in 15 minutes
+link_down_minutes = 5             # switch port down this long
+radio_reset_count = 3             # Wi-Fi radio resets per AP in 15 minutes
+low_mem_kb = 30000                # access point free memory
+feed_stall_seconds = 120          # live mode: no data for this long
+desktop_notify_min = "warning"    # "critical", "warning" or "info"

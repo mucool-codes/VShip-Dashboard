@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vessel Network Monitor</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path d="M3 15h18l-2.5 5h-13z M7 15V9h10v6 M12 9V4 M12 4l4 3h-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+    </span>
+    <div>
+      <div class="brand-title" id="vessel">Vessel</div>
+      <div class="brand-sub">Network monitor</div>
+    </div>
+  </div>
+  <div class="feed" id="feed">
+    <span class="pill" id="mode">-</span>
+    <span class="feed-text" id="feed-text">Connecting…</span>
+  </div>
+  <div class="areas" id="areas" aria-label="System status"></div>
+  <div class="top-actions">
+    <button class="icon-btn" id="notify-btn" title="Desktop notifications">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 10a6 6 0 1 1 12 0c0 5 2 6 2 6H4s2-1 2-6M10 20a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+      <span id="notify-label">Notify off</span>
+    </button>
+    <button class="icon-btn" id="theme-btn" title="Switch light/dark">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+    </button>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button role="tab" data-tab="infra" class="active">Infrastructure health</button>
+  <button role="tab" data-tab="security">Internet &amp; security</button>
+  <button role="tab" data-tab="alerts">Alerts <span class="badge" id="alert-badge">0</span></button>
+  <button role="tab" data-tab="explorer">Event explorer</button>
+  <div class="spacer"></div>
+  <div class="range" role="radiogroup" aria-label="Time range" id="range">
+    <button data-w="15m">15 min</button>
+    <button data-w="1h" class="active">1 hour</button>
+    <button data-w="6h">6 hours</button>
+    <button data-w="24h">24 hours</button>
+    <button data-w="7d">7 days</button>
+    <button data-w="custom" id="range-away" hidden title="The period you were away">Since last visit</button>
+  </div>
+</nav>
+
+<div class="learning" id="learning" hidden>
+  Learning normal behaviour - "new message type" alerts start once the app has seen two hours of data.
+</div>
+
+<main>
+  <div class="alert-strip" id="alert-strip"></div>
+
+  <!-- ===================== INFRASTRUCTURE ===================== -->
+  <section id="tab-infra" class="tab active">
+    <div class="kpis" id="infra-kpis"></div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2 id="infra-chart-title">Warnings and errors by device type</h2>
+        <div class="seg" id="infra-metric">
+          <button data-m="e" class="active">Warnings &amp; errors</button>
+          <button data-m="n">All messages</button>
+        </div>
+      </div>
+      <div class="chart" id="infra-chart"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Wi-Fi access points by deck</h2>
+        <div class="legend-inline">
+          <span class="st st-ok">● OK</span><span class="st st-warning">▲ Warning</span>
+          <span class="st st-critical">■ Critical</span><span class="st st-silent">○ Silent</span>
+        </div>
+      </div>
+      <div id="ap-grid" class="ap-grid"></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-head"><h2>Servers (ESXi / HPE iLO)</h2></div>
+        <div id="servers"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Switches</h2></div>
+        <div id="switches"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Top warning and error types</h2>
+        <span class="muted small">Known harmless chatter is hidden. Use "Hide" to add a type to the noise list.</span>
+      </div>
+      <div id="issues"></div>
+    </div>
+  </section>
+
+  <!-- ===================== SECURITY ===================== -->
+  <section id="tab-security" class="tab">
+    <div class="kpis" id="sec-kpis"></div>
+
+    <div class="card">
+      <div class="card-head"><h2>Firewall decisions over time</h2></div>
+      <div class="chart" id="sec-chart"></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-head"><h2>Top applications</h2></div>
+        <div id="apps"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Blocked traffic by deck</h2>
+          <span class="muted small">Location comes from the Wi-Fi access point the device last used</span></div>
+        <div id="decks"></div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-head"><h2>Most active devices</h2>
+          <span class="muted small" id="mask-note"></span></div>
+        <div id="clients"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Categories</h2></div>
+        <div id="cats"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Security events</h2>
+        <span class="muted small">Port scans, spoofing, floods, IPS hits, VPN/proxy bypass, VPN tunnel errors</span></div>
+      <div id="sec-events"></div>
+    </div>
+  </section>
+
+  <!-- ===================== ALERTS ===================== -->
+  <section id="tab-alerts" class="tab">
+    <div class="card">
+      <div class="card-head">
+        <h2>Alerts</h2>
+        <div class="seg" id="alert-filter">
+          <button data-s="active" class="active">Active</button>
+          <button data-s="all">History</button>
+        </div>
+      </div>
+      <div id="alert-list"></div>
+    </div>
+  </section>
+
+  <!-- ===================== EXPLORER ===================== -->
+  <section id="tab-explorer" class="tab">
+    <div class="card">
+      <form class="filters" id="ex-form">
+        <input type="search" id="ex-q" placeholder="Search text in messages (e.g. Deck5, TikTok, link)">
+        <select id="ex-cls">
+          <option value="">All device types</option>
+          <option value="wifi">Wi-Fi access points</option>
+          <option value="server">Servers</option>
+          <option value="firewall">Firewall</option>
+          <option value="switch">Switches</option>
+          <option value="other">Other</option>
+        </select>
+        <input type="text" id="ex-device" placeholder="Device name">
+        <select id="ex-sev">
+          <option value="7">Any severity</option>
+          <option value="4">Warnings and worse</option>
+          <option value="3">Errors and worse</option>
+        </select>
+        <label class="check"><input type="checkbox" id="ex-noise" checked> Hide noise</label>
+        <button type="submit" class="primary">Search</button>
+      </form>
+      <div id="ex-results" class="log"></div>
+    </div>
+  </section>
+</main>
+
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div><div class="drawer-title" id="dr-title"></div><div class="muted small" id="dr-sub"></div></div>
+    <button class="icon-btn" id="dr-close" aria-label="Close">✕</button>
+  </div>
+  <div class="drawer-body" id="dr-body"></div>
+</aside>
+<div class="modal-back" id="away" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="away-title">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title" id="away-title">While you were away</div>
+        <div class="muted small" id="away-period"></div>
+      </div>
+      <button class="icon-btn" id="away-close" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="away-body"></div>
+    <div class="modal-foot">
+      <button class="btn" id="away-explore">Show warnings &amp; errors in explorer</button>
+      <button class="btn" id="away-alerts">Open alerts page</button>
+      <button class="btn" id="away-range">Show this period on the dashboards</button>
+      <span class="spacer"></span>
+      <button class="primary" id="away-ok">Got it - go live</button>
+    </div>
+  </div>
+</div>
+<div class="tooltip" id="tooltip" role="tooltip"></div>
+
+<script src="/static/charts.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
