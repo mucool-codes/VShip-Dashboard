@@ -12,8 +12,8 @@ You can also open the same dashboard **on your phone** (Android or iPhone), laid
 
 **First time only:**
 1. Install Python (section 1, step 1).
-2. Double-click `start.bat`, fill in the Graylog address and token, save, then double-click `start.bat` again (section 1).
-3. *(Optional, for the phone)* Set up Tailscale on the laptop and phone (section 3).
+2. Get the Graylog address and an access token from IT, put them in `config.toml`, and double-click `start.bat` (sections 1 and 2).
+3. *(Optional, for the phone)* Set up Tailscale on the laptop and phone (section 4).
 
 **Every day:**
 1. Double-click **`start.bat`**. The dashboard opens in your browser.
@@ -33,35 +33,121 @@ You need Windows and about 10 minutes.
    - On the first screen, **tick "Add python.exe to PATH"**, then click *Install Now*.
 2. **Copy the `VShip-Dashboard` folder** to your laptop, for example to `D:\VShip-Dashboard`.
 3. **Connect it to the ship's log server (Graylog).**
+   You need the Graylog address and an access token from your IT / Graylog administrator.
+   **Section 2** explains what these are, how to get them, and how to check them.
    - Double-click **`start.bat`**. The first time, it creates a settings file called `config.toml` and opens it in Notepad.
-   - Fill in these lines. Your IT / Graylog administrator can give you both values:
-     ```
-     [vessel]
-     name = "MV Your Ship Name"
-
-     [graylog]
-     url = "http://<Graylog address>:9000"
-     token = "<your Graylog access token>"
-     ```
-   - Save the file (Ctrl+S) and close Notepad.
+   - Fill in the ship name, the Graylog address and the token (see 2.4), save (Ctrl+S) and close Notepad.
 4. **Double-click `start.bat` again.**
    - The first start installs what it needs, which takes about a minute. It does the same automatically after an update.
-   - Then the dashboard opens in your browser at **http://localhost:8080**.
-
-> **Asking IT for a token:** ask the Graylog administrator for "a read-only Graylog user and access token for the vessel network dashboard". It is a standard Graylog feature and costs nothing.
+   - Then the dashboard opens in your browser at **http://localhost:8080**, and the top bar should say **LIVE**.
 
 > **If Windows Firewall asks** whether to allow Python, click *Allow* on private networks.
 
 ---
 
-## 2. Every day
+## 2. Connecting to Graylog
+
+The ship's network devices already send their logs to **Graylog**, the log server. The monitor connects to Graylog and **asks it for new messages every 5 seconds**. The dashboard (and your phone) then update by themselves. Nothing on the ship's devices or on Graylog has to be changed.
+
+If the laptop was off, the monitor fetches what it missed (up to 7 days) and shows it in the **"While you were away"** summary.
+
+### 2.1 What you need
+
+| What | Where to get it | Example |
+|---|---|---|
+| **Graylog address** | The address you open Graylog with in the browser. Ask IT if unsure. | `http://192.168.1.10:9000` |
+| **Graylog version** | Shown at the bottom of the Graylog web page, or under **System → Overview**. | `6.1.4` |
+| **Access token** | Created in Graylog (see 2.2). | a long code of letters and numbers |
+
+### 2.2 The access token: what it is and how to get one
+
+**What it is:** a long random code that Graylog creates. Graylog won't hand out log messages to just anyone: a person logs in with a username and password, and the monitor shows this code instead. It looks like `1a2b3c4d5e6f7g8h9i0j…`, about 50 characters long.
+
+**How to create it.** It is best if your Graylog administrator does this:
+1. Ideally, the admin creates a separate **read-only** Graylog user, for example `vessel-dashboard`, that can read the streams holding the ship's logs.
+2. Log in to Graylog as that user.
+3. Click the **user name / profile icon** (top right), then **Edit profile** (or **Edit Tokens**).
+4. In the **Tokens** section, type a name such as `vessel-dashboard`, then click **Create Token**.
+5. **Copy the code straight away.** Graylog shows it only once.
+
+If you don't see a **Tokens** option, your Graylog user doesn't have permission to create tokens. Ask the Graylog administrator to create the token for you.
+
+> **What to ask IT for:** "Please create a read-only Graylog user and an access token for the vessel network dashboard. I also need the Graylog address and version."
+
+**Keep it private.** Treat the token like a password: anyone who has it can read the logs that user can see. Don't email it around or put it in shared documents. It is stored only in `config.toml` on this laptop, and that file is never uploaded to GitHub. If it leaks or stops working, delete it in the same Tokens screen and create a new one.
+
+**Does it cost anything?** No. Access tokens are a built-in part of every Graylog edition, including the free one. The monitor only *reads* logs Graylog already stores, so it doesn't add to the data Graylog takes in, which is what paid Graylog licences are priced on. One thing to check: if your company's Graylog licence is limited by **number of users**, a new `vessel-dashboard` user might use a seat. In that case ask the admin whether the token can be made on an existing account.
+
+### 2.3 Check the token works (1 minute, optional)
+
+Before starting the monitor, you can check the address and token from the laptop. Open **Command Prompt** (press Windows key, type `cmd`, press Enter) and run, with your own address and token:
+
+```
+curl.exe -u YOUR_TOKEN:token http://GRAYLOG_ADDRESS:9000/api/system
+```
+
+Type the word `token` after the colon exactly as shown; it is not a placeholder.
+
+| You see | Meaning |
+|---|---|
+| Text containing `"version"` | The address and token work. |
+| `401` or "Unauthorized" | The token is wrong or was deleted. |
+| "Connection refused", "Could not resolve host" or nothing happens for a long time | The address or port is wrong, or the laptop can't reach Graylog on this network (check you're on the ship network or VPN). |
+
+### 2.4 Put the details in `config.toml`
+
+1. Open `config.toml` in the `VShip-Dashboard` folder with Notepad. If it isn't there yet, double-click `start.bat` once: it creates the file and opens it.
+2. Set these lines:
+   ```toml
+   [vessel]
+   name = "MV Your Ship Name"
+
+   [source]
+   type = "graylog"
+
+   [graylog]
+   url = "http://192.168.1.10:9000"     # your Graylog address
+   token = "paste-the-token-here"       # between the quotes
+   api = "scripting"                    # Graylog 5.0 or newer. For Graylog 4.x write "export"
+   ```
+3. Save (Ctrl+S) and close Notepad.
+
+**Optional settings** in the same `[graylog]` section. Leave them as they are unless you need them:
+
+| Setting | What it does |
+|---|---|
+| `query = "*"` | Limits which messages are fetched, using a Graylog search, for example `source:AP*`. `*` means everything. |
+| `streams = []` | Limits it to certain Graylog streams. Your admin can give you the stream IDs. |
+| `poll_seconds = 5` | How often to ask Graylog for new messages. Use `10` or `30` if the admin wants less load. |
+| `lag_seconds = 5` | Reads slightly behind "now" so messages Graylog is still processing aren't missed. |
+| `backfill_minutes = 60` | On the very first start, how much history to load. |
+| `max_catchup_hours = 168` | After the laptop was off, the most it fetches (168 hours = 7 days). |
+| `verify_tls = true` | Only if Graylog uses `https://` with a self-signed certificate that you trust, set this to `false`. |
+
+### 2.5 Start it and check the connection
+
+Double-click **`start.bat`**. (Not `start_demo.bat`: that only plays back a saved file.)
+
+- **LIVE** (green) with *Graylog connected* in the top bar means it works. The charts fill within a minute.
+- **FEED ERROR** (red) means something is wrong; the message next to it says what. Typical causes:
+  - wrong address or port, or the laptop isn't on the ship network: check `url`
+  - token wrong or deleted: check `token`, or create a new one
+  - an error mentioning "404" or "not found": the Graylog version doesn't match. Switch `api` between `"scripting"` and `"export"`.
+
+  Fix `config.toml`, close the black window, and double-click `start.bat` again.
+
+The demo data and the live data are kept separate, so connecting to Graylog never mixes them.
+
+---
+
+## 3. Every day
 
 | To… | Do this |
 |---|---|
 | **Start the monitor** | Double-click `start.bat`. A black window opens, then the dashboard opens in your browser. |
 | **Stop the monitor** | Close the black window. (The phone then shows **OFFLINE** too.) |
 | **Reopen the dashboard** if you closed the browser | Double-click `start.bat` again, or go to http://localhost:8080. If the monitor is already running, it just reopens the page. |
-| **Open it on your phone** | Tap the **Vessel Net** icon (after the phone setup in section 3). |
+| **Open it on your phone** | Tap the **Vessel Net** icon (after the phone setup in section 4). |
 | **Show the phone address / QR code again** | Click **Phone** at the top of the dashboard on the laptop. |
 
 **Keep the black window open** while you want the monitor to watch the ship. You can minimise it. It checks Graylog for new messages every 5 seconds, so a new problem shows up on the dashboard within about 5 to 15 seconds.
@@ -90,7 +176,7 @@ The same summary also appears if the monitor was left running but nobody looked 
 
 ---
 
-## 3. Using it on your phone
+## 4. Using it on your phone
 
 ### Setting up the phone (once, about 10 minutes)
 
@@ -151,7 +237,7 @@ Notifications only arrive **while the dashboard is open on the phone**. A locked
 
 ---
 
-## 4. Reading the screen
+## 5. Reading the screen
 
 ### Top bar
 
@@ -227,7 +313,7 @@ Press **Esc** or **✕** to close it.
 
 ---
 
-## 5. What the alerts mean
+## 6. What the alerts mean
 
 | Alert | What it means | Typical first step |
 |---|---|---|
@@ -245,17 +331,17 @@ Press **Esc** or **✕** to close it.
 
 ---
 
-## 6. If something goes wrong
+## 7. If something goes wrong
 
 | Problem | Fix |
 |---|---|
 | Double-clicking `start.bat` closes straight away, or says Python is missing | Install Python (section 1) and make sure "Add python.exe to PATH" was ticked. |
-| The top bar says **FEED ERROR** | Read the message next to it. Usually the Graylog address or token in `config.toml` is wrong, or the laptop isn't on the ship network. |
+| The top bar says **FEED ERROR** | Read the message next to it. Usually the Graylog address or token in `config.toml` is wrong, or the laptop isn't on the ship network. Run the check in section 2.3; see also 2.5. |
 | "Port 8080 is used by another program" | Open `config.toml`, change `port = 8080` under `[server]` to `8081`, then restart. |
 | The page says **OFFLINE** | The black window was closed or the laptop went to sleep. Double-click `start.bat`. The phone reconnects by itself. |
 | Notifications don't appear | Click **Notify** / the bell, allow notifications in the browser, and check Windows "Focus assist / Do not disturb" is off. On the phone, the dashboard must be open on screen. |
 | The "While you were away" summary didn't appear | It only appears after being away for at least 10 minutes, on both the laptop and the phone. If you checked on the phone, the laptop won't show it again. |
-| The black window says Tailscale is not installed / not connected | Install Tailscale on the laptop or sign in to it (section 3). |
+| The black window says Tailscale is not installed / not connected | Install Tailscale on the laptop or sign in to it (section 4). |
 | It says **HTTPS is turned off** for Tailscale | Open the link it shows, or turn on HTTPS Certificates in the Tailscale admin page. Then click **Check again** in the **Phone** pop-up. |
 | The phone says "This site can't be reached" | Check: Tailscale is **on** on the phone; the laptop is awake with the black window open; the phone uses the **same** Tailscale account. Some ship or office Wi-Fi blocks Tailscale; try mobile data. |
 
@@ -263,7 +349,7 @@ More phone fixes are in [PHONE_ACCESS.md](PHONE_ACCESS.md).
 
 ---
 
-## 7. Trying it without the ship connection (demo)
+## 8. Trying it without the ship connection (demo)
 
 To see how it works using a saved log file (a Graylog CSV export):
 
@@ -275,9 +361,10 @@ The file plays back at 60× speed, so one hour of data plays in one minute. If y
 
 ---
 
-## 8. Good to know
+## 9. Good to know
 
 - **Phone:** the phone shows the laptop's dashboard, so it works only while the laptop is awake and the monitor window is open. Only devices signed in to your Tailscale account can open it. To switch phone access off, set `tailscale = false` under `[phone]` in `config.toml`.
+- **Graylog token:** keep it private like a password. It lives only in `config.toml` on this laptop and is never uploaded to GitHub. Creating it costs nothing (section 2.2).
 - **Privacy:** crew devices are shown as codes (`Device-3FA2C1`), not by their real addresses. Check your company policy before changing this (`mask_clients` in `config.toml`).
 - **Storage:** everything stays on this laptop, in the `data` folder. Messages older than 14 days are deleted automatically. You can change this with `retention_days` in `config.toml`.
 - **Settings:** alert thresholds such as how many minutes before a device counts as silent are in `config.toml`, with a comment on each line. Restart the monitor after changing them.
