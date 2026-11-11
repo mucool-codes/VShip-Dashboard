@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter, deque
 import logging
 import re
 import time
@@ -18,10 +19,12 @@ from .alerts import AlertEngine
 from .noise import NoiseFilter
 from .parser import SEV_NAMES, parse
 from .phone import Phone
-from .sources import GraylogSource, ReplaySource, SyslogSource
+from .graylog import GraylogSource
+from .sources import ReplaySource, SyslogSource
 from .state import State, mask_mac
 from .store import Store
 
+CLOCK_SKEW_S = 120         # a device clock more than 2 min off is treated as wrong
 log = logging.getLogger("vship")
 STATIC = Path(__file__).parent / "static"
 
@@ -65,6 +68,18 @@ class Pipeline:
         if not self.catching_up and self.away and not self.away.get("caught_up"):
             self.finish_catchup()      # nothing to load (e.g. syslog): the period ends now
         self.started = time.time()
+        self.clock_skew: dict[str, tuple[str, float]] = {}   # device -> (name, seconds its clock is off)
+        self.verify_fail_streak = 0
+        self._delays: dict[str, deque] = {}             # Graylog <6: per-device arrival delays
+        self._last_feed_problem = time.time()            # last Graylog error / outage (wall)
+        self._feed_ok = False
+        if self.kind == "graylog":
+            # Graylog <6 delivers a late device's messages once per completeness check;
+            # allow for that before calling it silent (set to 0 once Graylog 6+ is seen)
+            self.state.rx_grace = 2 * float(cfg["graylog"]["verify_seconds"] if cfg["graylog"]["api"] != "export"
+                                            else cfg["graylog"]["export_verify_seconds"]) + 30
+        self._dq_seen: dict = {}
+        self._last_verify_seen = None
         self.tasks: list[asyncio.Task] = []
         self._cache: dict = {}
 
@@ -77,15 +92,35 @@ class Pipeline:
             g = c["graylog"]
             if not g["token"]:
                 log.warning("No Graylog token set in config.toml - polling will fail.")
-            resume = latest
+            # newest stored message that isn't stamped in the future (a device whose
+            # clock is ahead does that): reading resumes from there
+            resume = self.store.latest_ts("gl_ts", upto=now) or (min(latest, now) if latest else None)
             cap = now - timedelta(hours=float(g["max_catchup_hours"]))
             if resume and resume < cap:
                 self.catch_note = (f"The app was closed for more than {g['max_catchup_hours']} h; only the "
                                    f"last {g['max_catchup_hours']} h were loaded (max_catchup_hours).")
                 resume = cap
-            return GraylogSource(g["url"], g["token"], g["query"], g["streams"], g["poll_seconds"],
-                                 g["lag_seconds"], g["api"], g["verify_tls"], g["backfill_minutes"],
-                                 resume_from=resume)
+            col = {"timestamp": "gl_ts", "gl2_receive_timestamp": "recv"}
+
+            async def local_counts(field, lo, hi):
+                return await asyncio.get_running_loop().run_in_executor(
+                    None, self.store.minute_counts, col[field], lo, hi)
+
+            async def known_keys(field, lo, hi):
+                return await asyncio.get_running_loop().run_in_executor(
+                    None, self.store.keys_between, col[field], lo, hi)
+
+            src = GraylogSource(g["url"], g["token"], g["query"], g["streams"], g["poll_seconds"],
+                                g["lag_seconds"], g["api"], g["verify_tls"], g["backfill_minutes"],
+                                resume_from=resume, rescan_seconds=g["rescan_seconds"],
+                                verify_seconds=g["verify_seconds"], verify_minutes=g["verify_minutes"],
+                                export_verify_seconds=g["export_verify_seconds"],
+                                local_counts=local_counts, known_keys=known_keys)
+            recv = self.store.latest_ts("recv")
+            src.resume_recv = max(recv, cap) if recv else None
+            src.floor_ts = self.store.earliest_ts("gl_ts", graylog_only=True)
+            src.floor_recv = self.store.earliest_ts("recv", graylog_only=True)
+            return src
         if kind == "syslog":
             s = c["syslog"]
             if self.session.get("last_alive_wall"):
@@ -144,6 +179,33 @@ class Pipeline:
         self.state.load(self.store.load_kv("state"))
         self.alerts.load(self.store.load_kv("alerts"))
         self.user_noise = self.store.load_kv("user_noise", [])
+        self._replay_tail()
+
+    def _replay_tail(self):
+        """Messages are written every second but the device state is saved every
+        minute. After a crash, feed the stored messages newer than the saved state
+        back into it, so "last seen", counters and port states are complete."""
+        if self.state.clock is None:
+            return
+        rows = self.store.query("SELECT ts, raw, noise, gid, recv, gl_ts FROM events WHERE ts > ? ORDER BY ts",
+                                [self.state.clock])
+        if not rows:
+            return
+        self.alerts.enabled = False          # these were already judged when they first arrived
+        self.state.catching_up = True        # ... and they didn't "just arrive"
+        for r in rows:
+            ts = datetime.fromisoformat(r["ts"])
+            try:
+                ev = parse(ts, "", r["raw"])
+            except Exception:
+                continue
+            ev.ts, ev.noise, ev.gid = ts, bool(r["noise"]), r["gid"] or ""
+            dv, new_tpl = self.state.ingest(ev)
+            self.alerts.on_event(ev, dv, new_tpl)
+        self.alerts.enabled = True
+        self.state.catching_up = False
+        self.state.rate_window.clear()
+        log.info("Restored %s messages stored after the last saved state.", len(rows))
 
     def save(self):
         self.store.flush()
@@ -205,12 +267,27 @@ class Pipeline:
 
     # ---- running ----------------------------------------------------------------
     async def run_source(self):
-        async for ts, source, message, pri in self.source.stream():
+        async for item in self.source.stream():
+            ts, source, message, pri = item[:4]
             try:
                 ev = parse(ts, source, message, pri)
             except Exception:  # never let one odd line stop the feed
                 log.exception("Could not parse: %r", message[:200])
                 continue
+            if len(item) > 4:               # Graylog: message id + receive time (completeness checks)
+                ev.gid, ev.recv, ev.gl_ts = item[4], item[5], ev.ts
+                if ev.recv is None and self.live and not self.catching_up:
+                    self.event_mode_clock(ev, item[6] if len(item) > 6 else None)
+                if ev.recv and abs((ev.ts - ev.recv).total_seconds()) > CLOCK_SKEW_S:
+                    # The device's own clock is wrong. Place the message at the time
+                    # Graylog received it, so "last seen" and silence checks stay true,
+                    # and tell the user (alert) that this device's clock needs fixing.
+                    self.clock_skew[ev.device] = (ev.device_name or ev.device, (ev.ts - ev.recv).total_seconds())
+                    ev.extra["dev_ts"] = ev.ts
+                    ev.ts = ev.recv
+                elif ev.recv and ev.device in self.clock_skew:
+                    self.clock_skew.pop(ev.device)          # clock fixed
+                    self.alerts.resolve(f"skew:{ev.device}", self.state.now())
             ev.noise = ev.template_id in self.user_noise or self.noise.is_noise(ev.raw)
             dv, new_tpl = self.state.ingest(ev)
             self.alerts.on_event(ev, dv, new_tpl)
@@ -233,6 +310,16 @@ class Pipeline:
                 if self.catching_up and self.source.status.get("caught_up"):
                     self.finish_catchup()
                     await loop.run_in_executor(None, self.save)
+                if self.source.status.get("time_field") == "received":
+                    self.state.rx_grace = 0.0             # Graylog 6+: arrival is exact
+                ok = self.source.status.get("state") == "connected"
+                if ok and not self._feed_ok:
+                    self.state.rx_floor = time.time()      # feed (back) up: restart the arrival clock
+                self._feed_ok = ok
+                hz = self.source.status.get("horizon")
+                if hz:
+                    self.state.horizon = datetime.fromisoformat(hz.replace("Z", "+00:00"))
+                self.data_quality_alerts()
                 self.alerts.tick(self.state.now())
                 if time.time() - last_session > 5:
                     last_session = time.time()
@@ -246,6 +333,105 @@ class Pipeline:
                                                self.cfg["storage"]["retention_days"])
             except Exception:
                 log.exception("housekeeping failed")
+
+    def event_mode_clock(self, ev, arrived):
+        """Graylog before 6.0 doesn't record when it received a message, so the
+        monitor can't *correct* a wrong device clock - and it never guesses: times are
+        shown as Graylog has them. It only reports a clock that is clearly behind:
+        nearly all of a device's messages arriving late by about the same amount
+        while the connection to Graylog has been healthy."""
+        if arrived is None:
+            return
+        now = time.time()
+        d = self._delays.setdefault(ev.device, deque(maxlen=40))
+        d.append((now, arrived.timestamp() - ev.ts.timestamp()))
+        while d and d[0][0] < now - 900:
+            d.popleft()
+        healthy = now - self._last_feed_problem > 900
+        if len(d) < 20 or not healthy:
+            return
+        delays = sorted(x for _, x in d)
+        late = [x for x in delays if x > 300]
+        q1, q3 = delays[len(delays) // 4], delays[3 * len(delays) // 4]
+        if len(late) >= 0.9 * len(delays) and q3 - q1 < 90:
+            med = delays[len(delays) // 2]
+            self.clock_skew[ev.device] = (ev.device_name or ev.device, -med)
+        elif ev.device in self.clock_skew and self.clock_skew[ev.device][1] < 0 and not late:
+            self.clock_skew.pop(ev.device)
+            self.alerts.resolve(f"skew:{ev.device}", self.state.now())
+
+    def data_quality_alerts(self):
+        """Say so when the data itself can't be trusted, instead of showing it silently."""
+        st, now = self.source.status, self.state.now()
+        a = self.alerts
+        if st.get("type") != "graylog":
+            return
+        if st.get("state") != "connected":
+            self._last_feed_problem = time.time()
+        # Graylog <6: devices stamping messages in the future (clock ahead)
+        future = getattr(self.source, "future", None)
+        if future is not None:                    # a new look at future-stamped messages
+            self.source.future = None
+            ahead = {}
+            for secs, src, msg in future:
+                try:
+                    ev = parse(datetime.now(timezone.utc), src, msg)
+                except Exception:
+                    continue
+                if secs > ahead.get(ev.device, (None, 0))[1]:
+                    ahead[ev.device] = (ev.device_name or ev.device, secs)
+            for dev, v in ahead.items():
+                self.clock_skew[dev] = v
+            for dev in [d for d, (_, off) in self.clock_skew.items() if off > 0 and d not in ahead]:
+                self.clock_skew.pop(dev)              # no future messages any more: fixed
+                a.resolve(f"skew:{dev}", now)
+        lv = st.get("last_verify")
+        if lv and lv != self._last_verify_seen:
+            self._last_verify_seen = lv
+            self.verify_fail_streak = 0 if st.get("verify_ok") is not False else self.verify_fail_streak + 1
+            if self.verify_fail_streak >= 3:
+                mm = st.get("mismatch_minutes") or []
+                miss = sum(max(0, m["graylog"] - m["stored"]) for m in mm)
+                a.raise_(now, "data_incomplete", "data_incomplete", "warning", "feed",
+                         "Some messages from Graylog could not be loaded",
+                         f"{len(mm)} minute(s) don't match Graylog ({miss} messages short), "
+                         f"e.g. {mm[0]['minute'] if mm else ''} UTC. Counts for those minutes may be too low.")
+            elif st.get("verify_ok"):
+                a.resolve("data_incomplete", now)
+        if st.get("bad_timestamps", 0) > self._dq_seen.get("bad_timestamps", 0):
+            self._dq_seen["bad_timestamps"] = st["bad_timestamps"]
+            a.raise_(now, "bad_timestamps", "bad_timestamps", "warning", "feed",
+                     "Graylog sent timestamps the monitor can't read",
+                     f"{st['bad_timestamps']} messages; they were placed at the time Graylog received them.")
+        if st.get("over_limit", 0) > self._dq_seen.get("over_limit", 0):
+            self._dq_seen["over_limit"] = st["over_limit"]
+            a.raise_(now, "over_limit", "over_limit", "warning", "feed",
+                     "Too many messages at the same moment - some may be missing",
+                     "More than 10,000 messages shared one timestamp; Graylog can't return more than that.")
+        for dev, (name, off) in list(self.clock_skew.items()):
+            if abs(self._dq_seen.get(dev, 1e9) - off) < 60:
+                continue                      # already reported at about this offset
+            self._dq_seen[dev] = off
+            # A "silent" alert for this device was caused by its wrong clock: say so.
+            for al in a.alerts.values():
+                if al["rule"] == "device_silent" and al["device"] == dev and "clock is wrong" not in al["detail"]:
+                    al["detail"] += " - Not a real silence: this device's clock is wrong."
+                    al["severity"] = "info"
+                    if al["active"]:
+                        a.resolve(al["key"], now)
+            dv = self.state.devices.get(dev)
+            name = (dv.name if dv and dv.name and not dv.name.count(":") >= 5 else name)
+            if st.get("time_field") == "received":
+                how = "Its messages are shown at the time Graylog received them. Set the device's clock (NTP)."
+            elif off > 0:
+                how = ("Its messages carry future times, so they reach the dashboard about "
+                       f"{abs(off) / 60:.0f} min late. Set the device's clock (NTP).")
+            else:
+                how = ("Its messages arrive in Graylog that much later than the time they carry, so its times "
+                       "on the dashboard are its own (wrong) clock's. Set the device's clock (NTP).")
+            a.raise_(now, "clock_skew", f"skew:{dev}", "info", "feed",
+                     f"Clock on {name} is {'ahead' if off > 0 else 'behind'} by about {abs(off) / 60:.0f} min",
+                     how, dev, name)
 
     async def start(self):
         self.tasks = [asyncio.create_task(self.run_source()), asyncio.create_task(self.housekeeping())]
@@ -449,13 +635,11 @@ def create_app(cfg: dict) -> FastAPI:
                        count(*) FILTER (WHERE fw_action='allowed') AS allowed
                 FROM events WHERE {fw} AND kind IN ('app_block','app_seen','proxy_access')
                 GROUP BY fw_cat ORDER BY blocked + allowed DESC LIMIT 10""", p)
-            clients = await pipe.q(f"""
-                SELECT coalesce(nullif(client_mac, ''), client_ip) AS c, any_value(client_mac) AS mac,
-                       any_value(client_ip) AS ip, count(*) AS n,
+            client_rows = await pipe.q(f"""
+                SELECT client_mac AS mac, client_ip AS ip, fw_app AS app, count(*) AS n,
                        count(*) FILTER (WHERE fw_action='blocked') AS blocked,
-                       mode(fw_app) FILTER (WHERE fw_app <> '') AS top_app,
                        count(*) FILTER (WHERE kind='proxy_access') AS proxy
-                FROM events WHERE {fw} AND client_ip <> '' GROUP BY 1 ORDER BY blocked DESC""", p)
+                FROM events WHERE {fw} AND client_ip <> '' GROUP BY ALL""", p)
             kinds = await pipe.q(f"""
                 SELECT kind, count(*) AS n FROM events WHERE {fw} GROUP BY kind""", p)
             sec = await pipe.q(f"""
@@ -465,13 +649,28 @@ def create_app(cfg: dict) -> FastAPI:
                 ORDER BY ts DESC LIMIT 150""", p)
 
             st = pipe.state
+            # One row per crew device: a device can appear by MAC on some lines and by
+            # IP on others - merge them so it isn't counted twice.
+            merged: dict[str, dict] = {}
+            for r in client_rows:
+                key = st.client_key(r["mac"], r["ip"])
+                c = merged.setdefault(key, {"key": key, "mac": "", "ip": r["ip"], "n": 0, "blocked": 0,
+                                            "proxy": 0, "apps": Counter()})
+                c["mac"] = c["mac"] or st.resolve_mac(r["mac"], r["ip"])
+                c["n"] += r["n"]; c["blocked"] += r["blocked"]; c["proxy"] += r["proxy"]
+                if r["app"]:
+                    c["apps"][r["app"]] += r["n"]
+            clients = sorted(merged.values(), key=lambda c: (-c["blocked"], -c["n"]))
+            for c in clients:
+                c["top_app"] = c["apps"].most_common(1)[0][0] if c["apps"] else ""
             k = {r["kind"]: r["n"] for r in kinds}
             total = sum(k.values())
             blocked = sum(r["blocked"] for r in ts)
+            allowed = sum(r["allowed"] for r in ts)
             decks: dict[str, dict] = {}
             top_clients = []
             for r in clients:
-                lab = st.client_label(r["mac"], r["ip"], pipe.mask)
+                lab = st.client_label(r["key"], "", pipe.mask)
                 deck = lab.get("deck") or "Unknown / wired"
                 d = decks.setdefault(deck, {"deck": deck, "clients": 0, "blocked": 0, "events": 0})
                 d["clients"] += 1
@@ -491,7 +690,8 @@ def create_app(cfg: dict) -> FastAPI:
             return {
                 "window": window, "bucket_min": b, "timeseries": ts,
                 "start": start.isoformat(), "end": now.isoformat(),
-                "kpis": {"total": total, "blocked": blocked, "allowed": total - blocked,
+                "kpis": {"total": total, "blocked": blocked, "allowed": allowed,
+                         "other": total - blocked - allowed,
                          "clients": len(clients),
                          "security": sum(k.get(x, 0) for x in SECURITY_KINDS if x != "web_denied"),
                          "proxy": k.get("proxy_access", 0)},

@@ -135,7 +135,15 @@
     if (st.last_event) parts.push(`Data time ${new Date(st.now).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}`);
     parts.push(`${st.events_per_sec}/s`);
     parts.push(`${fmt(st.events_total)} messages`);
-    if (src.type === "graylog") parts.push(src.state === "error" ? `Graylog: ${src.last_error}` : `Graylog ${src.state}`);
+    if (src.type === "graylog") {
+      parts.push(src.state === "error" ? `Graylog: ${src.last_error}` : `Graylog ${src.state}`);
+      // The monitor checks its data against Graylog's own counts every minute.
+      // (The last ~10 minutes are still being completed: Graylog can index late.)
+      if (src.verify_ok === true && src.settled_until)
+        parts.push(`✓ checked complete against Graylog up to ${new Date(src.settled_until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+      else if (src.verify_ok === false)
+        parts.push(`⚠ ${src.mismatch_minutes.length} min don't match Graylog`);
+    }
     if (src.type === "syslog") parts.push(`syslog ${src.listen}`);
     if (src.type === "replay" && src.state === "finished") parts.push("replay finished");
     $("feed-text").textContent = parts.join("  ·  ");
@@ -362,9 +370,9 @@
     let d; try { d = await api(`/api/security?${rangeQS()}`); } finally { sec.classList.remove("loading"); }
     const k = d.kpis;
     $("sec-kpis").replaceChildren(
-      kpi("Firewall events", fmt(k.total), h("span", {}, `${fmt(k.clients)} devices`)),
-      kpi("Blocked", h("span", {}, pct(k.blocked, k.total)), h("span", {}, `${fmt(k.blocked)} connections blocked by policy`)),
-      kpi("Allowed (logged)", fmt(k.allowed), h("span", {}, "apps detected and let through")),
+      kpi("Firewall events", fmt(k.total), h("span", {}, `${fmt(k.clients)} devices` + (k.other ? ` · ${fmt(k.other)} other notices` : ""))),
+      kpi("Blocked", h("span", {}, pct(k.blocked, k.blocked + k.allowed)), h("span", {}, `${fmt(k.blocked)} of ${fmt(k.blocked + k.allowed)} logged connections blocked`)),
+      kpi("Allowed (logged)", fmt(k.allowed), h("span", {}, "detected and let through")),
       kpi("Security events", fmt(k.security), k.security ? statusTag("warning", "scans, spoofing, IPS, floods, VPN") : statusTag("ok", "none")),
       kpi("VPN / proxy bypass", fmt(k.proxy), k.proxy ? statusTag("warning", "attempts to get around the filter") : statusTag("ok", "none")),
     );

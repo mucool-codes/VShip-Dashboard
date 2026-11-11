@@ -30,6 +30,11 @@ api = "scripting"                 # "scripting" for Graylog 5.0+, "export" for G
 verify_tls = true                 # set false only for a self-signed certificate you trust
 backfill_minutes = 60             # on first start, load this much history
 max_catchup_hours = 168           # after the app was closed, load at most this much missed data
+# Completeness (defaults are fine; see README "How the Graylog reader avoids missing or double-counting"):
+# rescan_seconds = 15          # each poll re-reads this much, for messages Graylog indexed a bit late
+# verify_seconds = 60          # how often to compare our data with Graylog's own counts
+# verify_minutes = 120         # how far back each comparison looks
+# export_verify_seconds = 300  # the same for Graylog 4.x (api = "export")
 
 [syslog]
 host = "0.0.0.0"                  # listen on all network cards

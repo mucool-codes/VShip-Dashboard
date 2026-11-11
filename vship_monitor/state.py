@@ -25,10 +25,20 @@ def mask_mac(mac: str) -> str:
     return "Device-" + hashlib.sha1(mac.lower().encode()).hexdigest()[:6].upper()
 
 
+def mask_ip(ip: str) -> str:
+    """A device we only know by IP address still gets its own code."""
+    if not ip:
+        return "Unknown device"
+    return "Device-" + hashlib.sha1(("ip:" + ip).encode()).hexdigest()[:6].upper()
+
+
+SHARED_MAC_IPS = 20    # a hardware address seen with more IPs than this is a router, not a device
+
+
 class Device:
     __slots__ = ("id", "cls", "name", "location", "ip", "first_seen", "last_seen",
-                 "total", "errors", "minutes", "uptime", "reboots", "mem_avail_kb",
-                 "clients", "link_state")
+                 "total", "errors", "minutes", "uptime", "uptime_ts", "boot", "last_rx", "reboots", "mem_avail_kb",
+                 "clients", "link_state", "recent_err")
 
     def __init__(self, id, cls):
         self.id, self.cls = id, cls
@@ -37,6 +47,10 @@ class Device:
         self.total = self.errors = 0
         self.minutes: dict[int, list[int]] = {}   # minute -> [events, errors]
         self.uptime = None
+        self.uptime_ts: float | None = None     # message time of the uptime sample
+        self.boot: float | None = None          # estimated boot time (epoch)
+        self.last_rx: float | None = None       # wall time the newest message from it arrived (live only)
+        self.recent_err: deque = deque()        # times of warnings/errors in the last 10 min (exact counts)
         self.reboots = 0
         self.mem_avail_kb = None
         self.clients: dict[str, float] = {}        # client mac -> last seen (epoch s)
@@ -65,6 +79,7 @@ class Device:
                 "ip": self.ip, "first_seen": self.first_seen.isoformat() if self.first_seen else None,
                 "last_seen": self.last_seen.isoformat() if self.last_seen else None,
                 "total": self.total, "errors": self.errors, "uptime": self.uptime,
+                "uptime_ts": self.uptime_ts, "boot": self.boot, "last_rx": self.last_rx,
                 "reboots": self.reboots, "mem_avail_kb": self.mem_avail_kb,
                 "minutes": {str(k): v for k, v in self.minutes.items()},
                 "clients": self.clients, "link_state": self.link_state}
@@ -72,7 +87,7 @@ class Device:
     @classmethod
     def from_dict(cls, d):
         dv = cls(d["id"], d["cls"])
-        for k in ("name", "location", "ip", "total", "errors", "uptime", "reboots",
+        for k in ("name", "location", "ip", "total", "errors", "uptime", "uptime_ts", "boot", "last_rx", "reboots",
                   "mem_avail_kb", "clients", "link_state"):
             if d.get(k) is not None:
                 setattr(dv, k, d[k])
@@ -86,14 +101,19 @@ class State:
     def __init__(self, live: bool):
         self.live = live
         self.catching_up = False
+        self.horizon: datetime | None = None        # Graylog: data is complete up to here
+        self.rx_grace = 0.0     # seconds: Graylog <6 delivers late messages once per check, allow for that
+        self.rx_floor = 0.0     # wall time the feed last became healthy (start-up or after an outage)
         self.clock: datetime | None = None          # latest event time seen
         self.first_clock: datetime | None = None    # first event ever (learning period)
         self.last_rx_wall: datetime | None = None   # wall time of last event received
         self.devices: dict[str, Device] = {}
         self.clients: dict[str, dict] = {}          # wifi/firewall client mac -> info
         self.ip_to_mac: dict[str, str] = {}
+        self.mac_ips: dict[str, set] = {}          # firewall: hardware address -> IPs seen with it
         self.templates: dict[int, dict] = {}
         self.fw_client_minutes: deque = deque()     # (minute, Counter(client -> blocked))
+        self.fw_blocked: deque = deque()            # (time, client) of blocked connections, last 5 min
         self.sec_events: deque = deque()            # (epoch s, kind)
         self.proxy_events: deque = deque()          # (epoch s, client label, app)
         self.dns_fail: dict[str, float] = {}        # AP name -> last DNS failure (epoch s)
@@ -107,7 +127,10 @@ class State:
         # While loading missed data after a restart, "now" follows the data so
         # time-based rules (e.g. device silent) judge it as it happened.
         if self.live and not self.catching_up:
-            return datetime.now(timezone.utc)
+            wall = datetime.now(timezone.utc)
+            # Graylog: only judge up to the time we *know* we have all data for.
+            # If Graylog is unreachable, devices must not look "silent".
+            return min(wall, self.horizon) if self.horizon else wall
         return self.clock or datetime.now(timezone.utc)
 
     # ---- ingest ---------------------------------------------------------------
@@ -140,6 +163,10 @@ class State:
             dv.ip = ev.ip
         if dv.last_seen is None or ev.ts > dv.last_seen:
             dv.last_seen = ev.ts
+        if self.live and not self.catching_up:
+            dv.last_rx = wall.timestamp()
+        if ev.ts < dv.first_seen:
+            dv.first_seen = ev.ts
         dv.total += 1
         m = minute_of(ev.ts)
         slot = dv.minutes.get(m)
@@ -152,6 +179,10 @@ class State:
         if ev.severity <= 4 and not ev.noise:
             slot[1] += 1
             dv.errors += 1
+            t = ev.ts.timestamp()
+            dv.recent_err.append(t)
+            while dv.recent_err and dv.recent_err[0] < t - 600:
+                dv.recent_err.popleft()
 
         # Wi-Fi client tracking. Only association/auth lines tie a client to an
         # AP; DHCP lines are snooped broadcasts that every AP on the VLAN sees,
@@ -170,14 +201,26 @@ class State:
             if ev.extra.get("os"):
                 c["os"] = ev.extra["os"]
 
+        # Firewall: learn which addresses belong together
+        if ev.dev_class == "firewall":
+            for mac_, ip_ in ev.extra.get("pairs", ()):
+                if mac_ and ip_:
+                    ips = self.mac_ips.setdefault(mac_, set())
+                    if len(ips) <= SHARED_MAC_IPS:
+                        ips.add(ip_)
+
         # Firewall: per-client blocked counts for the "noisy client" rule
         if ev.dev_class == "firewall" and ev.fw_action == "blocked":
-            key = ev.client_mac or ev.client_ip
+            key = self.client_key(ev.client_mac, ev.client_ip)
             if not self.fw_client_minutes or self.fw_client_minutes[-1][0] != m:
                 self.fw_client_minutes.append((m, Counter()))
                 while self.fw_client_minutes and self.fw_client_minutes[0][0] < m - 15:
                     self.fw_client_minutes.popleft()
             self.fw_client_minutes[-1][1][key] += 1
+            t = ev.ts.timestamp()
+            self.fw_blocked.append((t, key))
+            while self.fw_blocked and self.fw_blocked[0][0] <= t - 300:
+                self.fw_blocked.popleft()
 
         # Message types
         is_new = False
@@ -200,10 +243,26 @@ class State:
         wall = datetime.now(timezone.utc).timestamp()
         return round(sum(1 for t in self.rate_window if t > wall - 10) / 10, 1)
 
+    def resolve_mac(self, mac: str, ip: str) -> str:
+        """The crew device's hardware address, if we know it. A firewall line names a
+        device by IP and usually MAC; Wi-Fi lines tell us which MAC has which IP. A
+        MAC seen with many IPs is a router/gateway, not a device."""
+        mac = (mac or "").lower()
+        if mac and len(self.mac_ips.get(mac, ())) > SHARED_MAC_IPS:
+            mac = ""
+        return mac or self.ip_to_mac.get(ip, "").lower()
+
+    def client_key(self, mac: str, ip: str) -> str:
+        """One stable key per device, whether a line gives its MAC, its IP, or both."""
+        m = self.resolve_mac(mac, ip)
+        return m or (f"ip:{ip}" if ip else "")
+
     def client_label(self, mac: str, ip: str, mask: bool) -> dict:
-        mac = (mac or self.ip_to_mac.get(ip, "")).lower()
+        if mac.startswith("ip:"):                  # a client_key for a device known only by IP
+            mac, ip = "", mac[3:]
+        mac = self.resolve_mac(mac, ip)
         info = self.clients.get(mac, {})
-        return {"id": mask_mac(mac) if mac else (ip if not mask else "Unknown device"),
+        return {"id": mask_mac(mac) if mac else (mask_ip(ip) if mask else (ip or "Unknown device")),
                 "mac": "" if mask else mac, "ip": "" if mask else (ip or info.get("ip", "")),
                 "os": info.get("os", ""), "deck": info.get("deck", ""),
                 "ap": info.get("ap_name", "")}
@@ -214,6 +273,8 @@ class State:
                 "first_clock": self.first_clock.isoformat() if self.first_clock else None,
                 "devices": [d.to_dict() for d in self.devices.values()],
                 "clients": self.clients, "templates": list(self.templates.values()),
+                "mac_ips": {m: sorted(ips) for m, ips in self.mac_ips.items()},
+                "ip_to_mac": self.ip_to_mac,
                 "hw_status": self.hw_status}
 
     def load(self, d):
@@ -223,6 +284,7 @@ class State:
         self.first_clock = datetime.fromisoformat(d["first_clock"]) if d.get("first_clock") else None
         self.devices = {x["id"]: Device.from_dict(x) for x in d.get("devices", [])}
         self.clients = d.get("clients", {})
-        self.ip_to_mac = {v["ip"]: k for k, v in self.clients.items() if v.get("ip")}
+        self.ip_to_mac = d.get("ip_to_mac") or {v["ip"]: k for k, v in self.clients.items() if v.get("ip")}
+        self.mac_ips = {m: set(ips) for m, ips in (d.get("mac_ips") or {}).items()}
         self.templates = {int(t["id"]): t for t in d.get("templates", [])}
         self.hw_status = d.get("hw_status", {})

@@ -1,7 +1,7 @@
 """Where log lines come from. Each source is an async generator of
 (timestamp, source, message, syslog_pri) tuples.
 
-* GraylogSource   - polls the ship's Graylog server over its REST API
+* (GraylogSource lives in graylog.py)
 * SyslogSource    - listens for syslog forwarded straight to this laptop
 * ReplaySource    - plays a Graylog CSV export back as if it were live
 """
@@ -184,103 +184,3 @@ class SyslogSource:
 
 
 # ---------------------------------------------------------------------------------
-class GraylogSource:
-    """Poll Graylog for new messages.
-
-    api="scripting": POST /api/search/messages (Graylog 5.0 and later)
-    api="export":    POST /api/views/search/messages, CSV (Graylog 4.x)
-    Authentication: an access token, sent as username=<token>, password="token".
-    """
-
-    def __init__(self, url, token, query="*", streams=None, poll_seconds=5, lag_seconds=5,
-                 api="scripting", verify_tls=True, backfill_minutes=60, resume_from=None):
-        self.url = url.rstrip("/")
-        self.token, self.query, self.streams = token, query, list(streams or [])
-        self.poll, self.lag, self.api = poll_seconds, lag_seconds, api
-        self.verify = verify_tls
-        start = resume_from or datetime.now(timezone.utc) - timedelta(minutes=backfill_minutes)
-        self.cursor: datetime = start
-        # After a restart, everything up to the last stored message is already saved.
-        self.skip_until: datetime | None = resume_from
-        self.overlap_counts: Counter = Counter()   # rows already delivered inside the overlap window
-        self.status = {"type": "graylog", "url": self.url, "api": api, "state": "starting",
-                       "last_poll": None, "last_error": None, "caught_up": False}
-
-    def _fmt(self, t: datetime) -> str:
-        return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-
-    async def _fetch(self, client, frm, to, size):
-        headers = {"X-Requested-By": "vship-monitor"}
-        if self.api == "export":
-            body = {"timerange": {"type": "absolute", "from": self._fmt(frm), "to": self._fmt(to)},
-                    "query_string": {"type": "elasticsearch", "query_string": self.query},
-                    "fields_in_order": ["timestamp", "source", "message"], "limit": size}
-            if self.streams:
-                body["streams"] = self.streams
-            r = await client.post(f"{self.url}/api/views/search/messages", json=body,
-                                  headers={**headers, "Accept": "text/csv"})
-            r.raise_for_status()
-            rows = list(csv.reader(io.StringIO(r.text)))
-            return [(x[0], x[1], x[2]) for x in rows[1:] if len(x) >= 3]
-        body = {"query": self.query, "fields": ["timestamp", "source", "message"],
-                "timerange": {"type": "absolute", "from": self._fmt(frm), "to": self._fmt(to)},
-                "size": size, "sort": "timestamp", "sort_order": "asc"}
-        if self.streams:
-            body["streams"] = self.streams
-        r = await client.post(f"{self.url}/api/search/messages", json=body,
-                              headers={**headers, "Accept": "application/json"})
-        r.raise_for_status()
-        data = r.json()
-        names = [s.get("field") or s.get("name", "").replace("field: ", "") for s in data.get("schema", [])]
-        idx = {n: i for i, n in enumerate(names)}
-        out = []
-        for row in data.get("datarows", []):
-            out.append((row[idx.get("timestamp", 0)], row[idx.get("source", 1)], row[idx.get("message", 2)]))
-        return out
-
-    async def stream(self):
-        import httpx  # imported here so replay/syslog modes don't need it
-        size = 10_000
-        async with httpx.AsyncClient(auth=(self.token, "token"), verify=self.verify,
-                                     timeout=60) as client:
-            while True:
-                to = datetime.now(timezone.utc) - timedelta(seconds=self.lag)
-                frm = self.cursor - timedelta(seconds=self.lag)   # overlap; duplicates are skipped
-                try:
-                    rows = await self._fetch(client, frm, to, size)
-                    self.status.update(state="connected", last_poll=self._fmt(datetime.now(timezone.utc)),
-                                       last_error=None, last_batch=len(rows))
-                except Exception as e:  # keep running; show the problem in the UI
-                    self.status.update(state="error", last_error=f"{type(e).__name__}: {e}"[:300])
-                    log.warning("Graylog poll failed: %s", e)
-                    await asyncio.sleep(max(self.poll, 10))
-                    continue
-                # Each poll re-reads the last few seconds (Graylog indexes with a
-                # small delay). Rows in that overlap that were already delivered
-                # are skipped by count, so genuinely repeated log lines survive.
-                newest = self.cursor
-                used: Counter = Counter()
-                parsed = []
-                for ts, src, msg in rows:
-                    try:
-                        t = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-                    except ValueError:
-                        t = datetime.now(timezone.utc)
-                    h = hashlib.blake2b(f"{ts}|{src}|{msg}".encode(), digest_size=12).digest()
-                    parsed.append((t, h))
-                    used[h] += 1
-                    if used[h] <= self.overlap_counts.get(h, 0):
-                        continue
-                    if self.skip_until and t <= self.skip_until:
-                        continue
-                    newest = max(newest, t)
-                    yield t, src or "", msg or "", None
-                # A full page means there is more waiting: go again straight away.
-                full = len(rows) >= size and newest > self.cursor
-                self.cursor = newest if full else max(self.cursor, min(to, newest) if rows else to)
-                self.skip_until = None
-                edge = self.cursor - timedelta(seconds=self.lag)
-                self.overlap_counts = Counter(h for t, h in parsed if t >= edge)
-                if not full:
-                    self.status["caught_up"] = True     # everything up to "now" is loaded
-                    await asyncio.sleep(self.poll)

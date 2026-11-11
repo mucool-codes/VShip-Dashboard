@@ -79,6 +79,40 @@ The sample export is a Graylog "All messages" search, so the ship most likely al
 
 Tokens are free; they are a built-in Graylog feature. The status bar shows `Graylog connected`, or the error message if something is wrong (wrong URL, token or API version).
 
+Run **`check_graylog.bat`** (`tools/check_graylog.py`) to check the address, token, permissions, API setting, device clocks and how much of your real traffic the parser recognises. It only reads.
+
+#### How the Graylog reader avoids missing or double-counting messages
+
+`vship_monitor/graylog.py`. The request and response formats were checked against Graylog's own source (graylog2-server: `ScriptingApiResource`, `MessagesRequestSpec`, the export `MessagesRequest`, `TimeRangeQueryFactory`, `ObjectMapperProvider`).
+
+- **Exactly once:** every message is keyed by Graylog's `_id` (or, if a version doesn't return ids, a content key with an occurrence number). Re-reading a window never duplicates.
+- **Late indexing:** each poll re-reads the last `rescan_seconds` (15). Every `verify_seconds` (60), the reader asks `/api/search/aggregate` for Graylog's count per minute over the last `verify_minutes` (120) and compares with the stored count. Short minutes are re-read, and anything not yet stored is added (up to 3 rounds per check). Minutes older than 10 minutes that still differ raise a *Some messages could not be loaded* alert. On Graylog 4.x (`api = "export"`) the counts come from a timestamps-only listing, every `export_verify_seconds` (300).
+- **Device clocks:** Graylog 6.0+ records when it *received* each message (`gl2_receive_timestamp`), and the reader pages on that, so a device with a wrong clock can't slip past the time windows. Its messages are placed at the receive time, and a *Clock on … is off* alert is raised. Graylog 4.x and 5.x don't have receive times. There, the monitor can't *correct* a wrong clock, so it never guesses: times are shown exactly as Graylog has them.
+  - A clock that is **ahead** is reported for certain: Graylog then holds messages stamped in the future, and the alert names the device. Its messages are read when that time comes, so they reach the dashboard late.
+  - A clock that is **behind** is reported only on strong evidence: nearly all of the device's messages arrive late by about the same amount, with the Graylog connection healthy for 15 minutes.
+  - "Silent" means *nothing arrived*, so once live, a wrong clock alone never makes a device look silent.
+  - A restart is judged on the device's own clock, which is consistent with its uptime counter.
+- **No offset paging:** Graylog sorts only on the time field, so the order of messages that share a timestamp isn't stable between requests. A full page (10,000) is split at a timestamp instead. More than 10,000 messages in one millisecond can't be paged by Graylog; that raises an alert.
+- **Time zones:** Graylog writes dates in the token user's time zone (e.g. `+05:30`); all are converted to UTC. An unreadable timestamp is counted and alerted, never silently replaced.
+- **Outages:** while Graylog can't be reached, "now" for silence checks stops at the last time the data is known complete. Devices aren't reported silent because of a network problem. On reconnect, everything since then is read.
+- **Restarts:** the reader resumes from the last stored message, already knows the ids stored around that point, and its first check reaches back over everything stored (up to `verify_minutes`). So messages Graylog indexed late while the app was closed are still found.
+
+**Testing.** The whole path was verified end to end against a Graylog stand-in that reproduces the API behaviour listed above. It used the real sample (≈270,000 messages per run, part history, part live), with all of these faults in the same run:
+- 3% of messages indexed up to 5 minutes late, and some 4 minutes late
+- a 15,000-message burst in 2 seconds
+- one device clock 25 minutes behind and another 20 minutes ahead
+- `+05:30` timestamps
+- a 401 for 30 s, then 35% HTTP 500s for a minute
+- 4 s slow responses
+- `kill -9` of the monitor and a restart
+- a 3-minute outage
+
+Every stored message was compared with Graylog's, and every alert was checked. For Graylog 6+, 5.x and 4.x:
+- **Data:** every message stored exactly once, with Graylog's time (receive time for wrong-clock devices on 6+) and text. The self-check was green, and the wrong clocks were reported.
+- **Alerts:** no false "silent", "restarted" or "data incomplete" alerts, even with silence thresholds lowered to 1 minute.
+
+The test is in `tools/e2e/` (`run_e2e.py` with the stand-in `graylog_emulator.py`); re-run it after changing the reader. A control run with the safeguards switched off lost 356 messages, which shows the test does detect loss. Separately, an independent re-count of the full 950,244-message sample confirmed every device count, last-seen time, chart bucket, switch port, firewall figure and checked alert number, and the dashboard on laptop, iPhone and Android shows exactly those numbers. It hasn't yet been run against V.Ships' real Graylog: `check_graylog.bat` is the first thing to run there.
+
 ### Option 2 - syslog sent straight to the laptop
 
 Use this if there is no Graylog, or as a second copy of the feed. Configure the ship's syslog server (or the devices) to forward to the laptop's IP on **UDP or TCP port 5514**:
@@ -177,7 +211,10 @@ CSV replay ──┘                                                     │
 | `vship_monitor/app.py` | Pipeline, catch-up / "while you were away", and the web API |
 | `vship_monitor/phone.py` | Tailscale detection, `tailscale serve` setup, QR codes for phone access |
 | `vship_monitor/static/` | The dashboard (plain HTML/CSS/JS, no build step), home-screen icons and service worker |
-| `tests/` | Parser tests from real sample lines (`python -m pytest`) |
+| `vship_monitor/graylog.py` | Graylog reader: ids, rescans, per-minute completeness check, clocks |
+| `tests/` | Parser and reliability tests (`python -m pytest`) |
+| `tools/check_graylog.py` | On-site check of the Graylog connection and data (`check_graylog.bat`) |
+| `tools/e2e/` | End-to-end test against a Graylog stand-in with injected faults |
 
 Sizing from the sample: about 105k messages/hour, roughly 30 per second, with peaks near 750/s. Parsing runs at about 30k lines/s, and dashboard queries take around 0.1 s on 24 hours of data.
 

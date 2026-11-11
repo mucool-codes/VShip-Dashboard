@@ -35,6 +35,7 @@ def main():
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)   # one line per Graylog request is just noise
     cfg = config_mod.load(args.config)
     if args.replay:
         cfg["source"]["type"] = "replay"

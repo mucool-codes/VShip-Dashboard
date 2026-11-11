@@ -78,21 +78,21 @@ If you don't see a **Tokens** option, your Graylog user doesn't have permission 
 
 **Does it cost anything?** No. Access tokens are a built-in part of every Graylog edition, including the free one. The monitor only *reads* logs Graylog already stores, so it doesn't add to the data Graylog takes in, which is what paid Graylog licences are priced on. One thing to check: if your company's Graylog licence is limited by **number of users**, a new `vessel-dashboard` user might use a seat. In that case ask the admin whether the token can be made on an existing account.
 
-### 2.3 Check the token works (1 minute, optional)
+### 2.3 Check the connection (2 minutes)
 
-Before starting the monitor, you can check the address and token from the laptop. Open **Command Prompt** (press Windows key, type `cmd`, press Enter) and run, with your own address and token:
+After filling in `config.toml` (2.4), double-click **`check_graylog.bat`**. It only *reads* from Graylog, and you can run it any time, even while the monitor is running. It checks, in plain words:
 
-```
-curl.exe -u YOUR_TOKEN:token http://GRAYLOG_ADDRESS:9000/api/system
-```
-
-Type the word `token` after the colon exactly as shown; it is not a placeholder.
-
-| You see | Meaning |
+| Check | What a problem means |
 |---|---|
-| Text containing `"version"` | The address and token work. |
-| `401` or "Unauthorized" | The token is wrong or was deleted. |
-| "Connection refused", "Could not resolve host" or nothing happens for a long time | The address or port is wrong, or the laptop can't reach Graylog on this network (check you're on the ship network or VPN). |
+| Graylog can be reached, and its version | Wrong address or port, or the laptop isn't on the ship network or VPN |
+| The token works and can read the logs | Wrong or deleted token (*401*), or the user isn't allowed to search the logs (*403*): ask the Graylog admin |
+| The right `api` setting for your Graylog version | It tells you exactly what to put in `config.toml` |
+| Message ids and receive times | Graylog 5+ gives both. The monitor uses them to prove it has every message exactly once |
+| Device clocks | Lists any device whose clock is more than 2 minutes wrong |
+| Your real recent messages | How many the monitor recognises, with examples of any it doesn't |
+| If the monitor is running | Whether its stored data matches Graylog, minute by minute |
+
+Each line starts with **OK**, **CHECK** (worth knowing) or **PROBLEM** (needs fixing). The last line says whether everything looks right.
 
 ### 2.4 Put the details in `config.toml`
 
@@ -129,12 +129,13 @@ Type the word `token` after the colon exactly as shown; it is not a placeholder.
 Double-click **`start.bat`**. (Not `start_demo.bat`: that only plays back a saved file.)
 
 - **LIVE** (green) with *Graylog connected* in the top bar means it works. The charts fill within a minute.
+- After a minute or two the top bar also shows **✓ checked complete against Graylog up to HH:MM**. Every minute, the monitor asks Graylog how many messages it holds for each minute and compares that with what it has stored. Any message it's missing (for example one Graylog indexed late) is fetched during that check. The last ~10 minutes are still being completed, because Graylog itself can be a little behind, so the time shown is about 10 minutes ago.
 - **FEED ERROR** (red) means something is wrong; the message next to it says what. Typical causes:
   - wrong address or port, or the laptop isn't on the ship network: check `url`
   - token wrong or deleted: check `token`, or create a new one
   - an error mentioning "404" or "not found": the Graylog version doesn't match. Switch `api` between `"scripting"` and `"export"`.
 
-  Fix `config.toml`, close the black window, and double-click `start.bat` again.
+  Fix `config.toml`, close the black window, and double-click `start.bat` again. `check_graylog.bat` shows the exact reason.
 
 The demo data and the live data are kept separate, so connecting to Graylog never mixes them.
 
@@ -275,7 +276,7 @@ For keeping the ship's network running.
 
 For crew internet use and cyber security.
 
-- **Summary tiles** - firewall events, the share blocked, security events and VPN/proxy-bypass attempts.
+- **Summary tiles** - firewall events; **Blocked** (the share of logged connections the firewall stopped); **Allowed (logged)** (connections the firewall noticed and let through, e.g. apps it detected but doesn't block); security events; VPN/proxy-bypass attempts. Notices that aren't a block/allow decision (port-scan warnings, VPN errors) are counted under *other notices*, not as "allowed".
 - **Firewall decisions over time** - blocked (orange) versus allowed (blue).
 - **Top applications** - which apps are being blocked or allowed, for example TikTok and YouTube.
 - **Blocked traffic by deck** - where on the ship the blocked traffic comes from. The location is taken from the Wi-Fi access point the device last connected to.
@@ -328,6 +329,10 @@ Press **Esc** or **✕** to close it.
 | **Possible TCP flood** | The firewall sees a flood of connection attempts. | Inform IT / security immediately. |
 | **New warning / error type** | A kind of problem never seen before on this ship. | Read it, and click *Hide* if it is harmless. |
 | **No log data is arriving** | The monitor isn't receiving anything at all. | Check the laptop is on the ship network and the log server is up. |
+| **Failed SSH / web UI login on …** | Someone typed a wrong password for a network device (the alert shows the user name and the address it came from). | One or two may be a typo. Repeated ones are a security concern: inform IT / security. |
+| **Clock on … is behind / ahead by about N min** | That device's own clock is wrong. With Graylog 6 or newer, the monitor shows its messages at the time Graylog received them, so the dashboard stays correct. With older Graylog, the times on its messages are the device's own (wrong) ones; if its clock is ahead, its messages also reach the dashboard that much later. | Ask IT to set the device's clock (NTP). |
+| **Some messages from Graylog could not be loaded** | For some minutes the monitor still has fewer messages than Graylog after repeated tries, so counts for those minutes may be too low. | Check the connection (run `check_graylog.bat`). Usually it clears itself; if it stays, inform whoever maintains the monitor. |
+| **Graylog sent timestamps the monitor can't read** / **Too many messages at the same moment** | Rare data problems the monitor won't hide. The alert says what was affected. | Run `check_graylog.bat` and pass the result to whoever maintains the monitor. |
 
 ---
 
@@ -364,6 +369,7 @@ The file plays back at 60× speed, so one hour of data plays in one minute. If y
 ## 9. Good to know
 
 - **Phone:** the phone shows the laptop's dashboard, so it works only while the laptop is awake and the monitor window is open. Only devices signed in to your Tailscale account can open it. To switch phone access off, set `tailscale = false` under `[phone]` in `config.toml`.
+- **Can I trust the numbers?** The monitor reads every message from Graylog exactly once (each Graylog message has a unique id), checks its data against Graylog's own counts every minute, and fetches anything missing. While Graylog can't be reached it shows **FEED ERROR** and does *not* mark devices as silent: it only judges devices on data it actually has. When Graylog is back, it fetches what it missed. If something can't be put right, it says so with an alert instead of showing wrong numbers.
 - **Graylog token:** keep it private like a password. It lives only in `config.toml` on this laptop and is never uploaded to GitHub. Creating it costs nothing (section 2.2).
 - **Privacy:** crew devices are shown as codes (`Device-3FA2C1`), not by their real addresses. Check your company policy before changing this (`mask_clients` in `config.toml`).
 - **Storage:** everything stays on this laptop, in the `data` folder. Messages older than 14 days are deleted automatically. You can change this with `retention_days` in `config.toml`.

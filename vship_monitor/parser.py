@@ -44,13 +44,16 @@ class Event:
     # optional detail
     client_mac: str = ""
     client_ip: str = ""
-    fw_action: str = ""            # blocked | allowed
+    fw_action: str = ""            # blocked | allowed | "" (not a traffic decision)
     fw_app: str = ""
     fw_cat: str = ""
     dst_ip: str = ""
     dst_port: int = 0
     port: str = ""                 # switch port
     extra: dict = field(default_factory=dict)
+    gid: str = ""                  # Graylog message id (or content key) - used to prove completeness
+    recv: datetime | None = None   # when Graylog received it (Graylog 6+)
+    gl_ts: datetime | None = None  # Graylog's own timestamp, unchanged (for checks against Graylog)
 
 
 # --- helpers ------------------------------------------------------------------
@@ -122,7 +125,9 @@ def _parse_firewall(ts, raw):
         ev.client_ip, ev.client_mac = dst_ip, kv.get("dstMac", "")
         ev.dst_ip, ev.dst_port = src_ip, src_port
     ev.extra = {"rule": kv.get("rule", ""), "proto": kv.get("proto", ""),
-                "remote_ip": src_ip if ev.client_ip == dst_ip else dst_ip}
+                "remote_ip": src_ip if ev.client_ip == dst_ip else dst_ip,
+                # both sides' hardware addresses: lets the app spot a router (one MAC, many IPs)
+                "pairs": [(kv.get("srcMac", "").lower(), src_ip), (kv.get("dstMac", "").lower(), dst_ip)]}
 
     action = kv.get("fw_action", "").lower()
     head = msg.split(":")[0].strip()
@@ -154,7 +159,15 @@ def _parse_firewall(ts, raw):
         ev.kind, ev.severity, ev.template = "vpn_error", 4, make_template(msg)
     else:
         ev.kind, ev.severity, ev.template = "fw_other", 6, make_template(msg)
-    ev.fw_action = "blocked" if action == "drop" or ev.kind == "app_block" else "allowed"
+    # Only real traffic decisions count as blocked/allowed. SonicWall marks drops with
+    # fw_action="drop"; "Detection" alerts (app control, IPS) let the traffic through.
+    # Scans, floods, VPN errors and SSL-inspection notices are not decisions.
+    if action == "drop" or ev.kind == "app_block":
+        ev.fw_action = "blocked"
+    elif ev.kind in ("app_seen", "proxy_access", "ips") or action in ("forward", "allow", "accept"):
+        ev.fw_action = "allowed"
+    else:
+        ev.fw_action = ""
     ev.template_id = template_id("firewall", ev.kind, ev.template)
     return ev
 
@@ -169,6 +182,12 @@ _RE_WLAN_LVL = re.compile(r"wlan: \[\d+:([IWED]):")
 _RE_PROG = re.compile(r"^([A-Za-z_][\w\-]*)(?:\[\d+\])?:")
 _RE_CLIENT_DHCP = re.compile(rf"ip:\[([\d.]*)\], mac:\[({_MAC})\](?:, (?:host|hostname):\[([^\]]*)\])?(?:.*?os ?type:\[([^\]]*)\])?")
 _RE_CLIENT_80211 = re.compile(rf"\[ath\d+\({_MAC}\)\] \[({_MAC})")
+
+
+_RE_SSH_FAIL = re.compile(r"Bad password attempt for '([^']*)' from ([\d.]+)|"
+                          r"Failed password for (?:invalid user )?(\S+) from ([\d.]+)", re.I)
+# Lines the AP tags <ERR>/<WARNING> that are plainly informational
+_RE_AP_INFO = re.compile(r"\[cfgsync\]: I'm PVC|Successfully set interface \S+ channel")
 
 
 def _parse_ap(ts, raw, m):
@@ -198,8 +217,15 @@ def _parse_ap(ts, raw, m):
     wl = _RE_WLAN_LVL.search(body)
     if wl:
         ev.severity = {"I": 6, "W": 4, "E": 3, "D": 7}.get(wl.group(1), ev.severity)
+    if _RE_AP_INFO.search(body):
+        ev.severity = 6
 
-    if "Login successfully" in body or "Login failed" in body or "login fail" in body.lower():
+    ssh = _RE_SSH_FAIL.search(body)
+    if ssh:
+        ev.kind, ev.severity = "admin_login_failed", 4
+        ev.extra.update(user=ssh.group(1) or ssh.group(3) or "?", from_ip=ssh.group(2) or ssh.group(4) or "?",
+                        via="SSH")
+    elif "Login successfully" in body or "Login failed" in body or "login fail" in body.lower():
         ev.kind = "admin_login" if "successfully" in body else "admin_login_failed"
         ev.severity = 5 if ev.kind == "admin_login" else 4
         um = re.search(r"\[([^@\]]+)@(?:::ffff:)?([\d.]+)\]", body)

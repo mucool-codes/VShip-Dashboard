@@ -30,6 +30,7 @@ RESOLVE_AFTER = {
     "dns_unreachable": 30, "low_memory": 30, "new_message_type": 120,
     "proxy_access": 60, "noisy_client": 15, "port_scan": 30, "flood": 30,
     "vpn_error": 30, "admin_login": 60, "admin_login_failed": 60, "feed_stalled": 0,
+    "data_incomplete": 0, "clock_skew": 0, "bad_timestamps": 240, "over_limit": 240,
 }
 
 
@@ -95,8 +96,14 @@ class AlertEngine:
         c, now, k = self.cfg, ev.ts, ev.kind
         name = dv.name or ev.device
 
+        # Messages can arrive out of order (Graylog indexing some late). Anything that
+        # holds a *current* state (sensor status, port up/down) only takes a message
+        # that is newer than the one it already has.
         if k == "hw_sensors":
             bad = ev.extra.get("bad_sensors") or {}
+            prev = self.state.hw_status.get(ev.device)
+            if prev and datetime.fromisoformat(prev["ts"]) > now:
+                return
             self.state.hw_status[ev.device] = {"ts": now.isoformat(), "bad": bad}
             key = f"hw:{ev.device}"
             if bad:
@@ -110,12 +117,12 @@ class AlertEngine:
         elif k in ("link_down", "link_up") and ev.port:
             ls = dv.link_state.setdefault(ev.port, ["up", now.isoformat(), []])
             if k == "link_down":
-                ls[0], ls[1] = "down", now.isoformat()
-                ls[2].append(now.timestamp())
+                ls[2].append(now.timestamp())       # a late "down" still counts towards flapping
                 ls[2][:] = [t for t in ls[2] if t > now.timestamp() - 3600]
-            else:
-                ls[0], ls[1] = "up", now.isoformat()
-                self.resolve(f"linkdown:{ev.device}:{ev.port}", now)
+            if now >= datetime.fromisoformat(ls[1]):
+                ls[0], ls[1] = ("down" if k == "link_down" else "up"), now.isoformat()
+                if k == "link_up":
+                    self.resolve(f"linkdown:{ev.device}:{ev.port}", now)
 
         elif k == "admin_login":
             who = ev.extra.get("user", "?")
@@ -123,23 +130,29 @@ class AlertEngine:
             self.raise_(now, "admin_login", f"login:{ev.device}:{who}:{src}", "info", "security",
                         f"Admin login to {name}", f"User {who} from {src} (web UI)", ev.device, name)
         elif k == "admin_login_failed":
+            via = ev.extra.get("via", "web UI")
+            who, src = ev.extra.get("user", "?"), ev.extra.get("from_ip", "?")
             self.raise_(now, "admin_login_failed", f"loginfail:{ev.device}", "warning", "security",
-                        f"Failed admin login on {name}", ev.raw[-160:], ev.device, name)
+                        f"Failed {via} login on {name}",
+                        f"Wrong password for user '{who}' from {src}" if who != "?" else ev.raw[-160:],
+                        ev.device, name)
 
         elif k == "proxy_access":
             # One rolling alert for the whole ship; per-device detail is on the
             # Internet & Security page.
             who = self.state.client_label(ev.client_mac, ev.client_ip, self.mask)
             dq = self.state.proxy_events
-            dq.append((now.timestamp(), who["id"], ev.fw_app))
+            dq.append((now.timestamp(), self.state.client_key(ev.client_mac, ev.client_ip) or who["id"], ev.fw_app))
             while dq and dq[0][0] < now.timestamp() - 3600:
                 dq.popleft()
             devs = Counter(d for _, d, _ in dq)
             kinds = Counter(a for _, _, a in dq)
+            top_key = devs.most_common(1)[0][0]
+            top = self.state.client_label(top_key, "", self.mask)["id"]
             self.raise_(now, "proxy_access", "proxy", "warning", "security",
                         f"VPN / proxy-bypass traffic from {len(devs)} device{'s' if len(devs) != 1 else ''} (last hour)",
                         ", ".join(f"{a}: {n}" for a, n in kinds.most_common(3))
-                        + f". Most active: {devs.most_common(1)[0][0]}")
+                        + f". Most active: {top}")
         elif k == "flood":
             msg = re.search(r'msg="([^"]+)"', ev.raw)
             text = msg.group(1) if msg else ev.template
@@ -155,7 +168,7 @@ class AlertEngine:
         elif k == "radio_reset":
             dq = self.state.radio_resets.setdefault(ev.device, deque())
             dq.append(now.timestamp())
-            while dq and dq[0] < now.timestamp() - 900:
+            while dq and dq[0] <= now.timestamp() - 900:
                 dq.popleft()
             if len(dq) >= c["radio_reset_count"]:
                 self.raise_(now, "radio_reset", f"radio:{ev.device}", "warning", "wifi",
@@ -183,14 +196,22 @@ class AlertEngine:
                             f"Low memory on {name}", f"{kb // 1024} MB available", ev.device, name)
 
         # AP reboot: the kernel uptime counter went backwards
+        # Judged by boot time (message time - uptime), which stays put while the AP
+        # runs. Only a *newer* message whose boot time jumped forward is a restart;
+        # a late-arriving older message (smaller uptime) is not.
         up = ev.extra.get("uptime") if ev.dev_class == "wifi" else None
         if up is not None:
-            if dv.uptime is not None and up + 60 < dv.uptime:
-                dv.reboots += 1
-                self.raise_(now, "ap_reboot", f"reboot:{ev.device}", "warning", "wifi",
-                            f"{name} restarted", f"Uptime reset from {dv.uptime // 3600} h to {up // 60} min",
-                            ev.device, name)
-            dv.uptime = up
+            t = (ev.extra.get("dev_ts") or ev.ts).timestamp()   # the device's own clock, never corrected
+            boot = t - up
+            if dv.uptime_ts is None or t >= dv.uptime_ts:
+                if dv.boot is not None and boot - dv.boot > 600:
+                    dv.reboots += 1
+                    self.raise_(now, "ap_reboot", f"reboot:{ev.device}", "warning", "wifi",
+                                f"{name} restarted",
+                                f"Uptime reset from {dv.uptime // 3600 if dv.uptime else '?'} h to {up // 60} min",
+                                ev.device, name)
+                dv.boot = boot if dv.boot is None or boot - dv.boot > 600 else min(dv.boot, boot)
+                dv.uptime, dv.uptime_ts = up, t
 
         # New kind of warning/error never seen before (after the learning period)
         if new_template and ev.severity <= 4 and not ev.noise and self.state.first_clock:
@@ -218,6 +239,16 @@ class AlertEngine:
             key = f"silent:{dv.id}"
             if limit and dv.last_seen and dv.first_seen:
                 quiet = (now - dv.last_seen).total_seconds() / 60
+                if st.live and dv.last_rx:
+                    # (also while catching up after a restart: "now" is then the data's
+                    # time, and last_rx is when its messages last arrived before that)
+                    # Silent means nothing *arrived*. A device with a wrong clock can
+                    # have old-looking timestamps while still sending.
+                    # Live: arrival time counts only since the feed was last healthy - after
+                    # an outage every device gets its normal time to show up again.
+                    base = dv.last_rx if st.catching_up else max(dv.last_rx, st.rx_floor)
+                    arrived = (min(datetime.now(timezone.utc), now).timestamp() - base - st.rx_grace) / 60
+                    quiet = min(quiet, max(arrived, 0))
                 known_for = (dv.last_seen - dv.first_seen).total_seconds() / 60
                 end = minute_of(dv.last_seen)
                 regular = (known_for >= 30 and dv.regularity(end) >= 0.8
@@ -232,7 +263,8 @@ class AlertEngine:
                     self.resolve(key, now)
 
             # 2. error spike vs this device's own normal level
-            cur = dv.window(now_min, 5, 1)
+            # exact count over the last 5 minutes (the text says "in 5 min")
+            cur = sum(1 for t in dv.recent_err if now.timestamp() - 300 < t <= now.timestamp())
             key = f"spike:{dv.id}"
             if cur >= c["spike_min_errors"]:
                 past = [sum(dv.minutes.get(m, [0, 0])[1] for m in range(end - 5, end))
@@ -261,13 +293,10 @@ class AlertEngine:
                                     f"Down for {int(mins)} min", dv.id, name)
 
         # 4. one client hammering the firewall
-        totals = Counter()
-        for m, cnt in st.fw_client_minutes:
-            if m > now_min - 5:
-                totals.update(cnt)
+        totals = Counter(k for t, k in st.fw_blocked if now.timestamp() - 300 < t <= now.timestamp())
         for client, n in totals.most_common(5):
             if n >= c["noisy_client_drops"]:
-                lab = st.client_label(client if ":" in client else "", client if ":" not in client else "", self.mask)
+                lab = st.client_label(client, "", self.mask)
                 self.raise_(now, "noisy_client", f"noisy:{client}", "info", "firewall",
                             f"{lab['id']} is generating heavy blocked traffic",
                             f"{n} blocked connections in 5 min"

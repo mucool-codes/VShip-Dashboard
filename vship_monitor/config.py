@@ -28,6 +28,10 @@ DEFAULTS = {
         "verify_tls": True,
         "backfill_minutes": 60,    # on first start, fetch this much history
         "max_catchup_hours": 168,  # after the app was closed, load at most this much missed data
+        "rescan_seconds": 15,      # each poll re-reads this much (messages Graylog indexed a bit late)
+        "verify_seconds": 60,      # how often to check our data against Graylog's own counts
+        "verify_minutes": 120,     # how far back each check looks
+        "export_verify_seconds": 300,  # same check for Graylog 4.x (api = "export"); it costs more there
     },
     "syslog": {"host": "0.0.0.0", "udp_port": 5514, "tcp_port": 5514},
     "replay": {"csv": "", "speed": 60.0, "loop": False},
